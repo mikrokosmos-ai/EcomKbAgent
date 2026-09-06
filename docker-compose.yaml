@@ -1,0 +1,112 @@
+name: ecomkbagent
+services:
+  # ===== 项目自带 MinIO=====
+  minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: ecomkb-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # S3 / 数据 API（应用通过 127.0.0.1:9000 访问）
+      - "9001:9001"   # Web 控制台
+    volumes:
+      - ./volumes/minio:/data
+    command: minio server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ===== Milvus 依赖：etcd（命名卷）=====
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: ecomkb-etcd
+    restart: unless-stopped
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://etcd:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ===== Milvus 依赖：内部 MinIO=====
+  milvus-minio:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: ecomkb-milvus-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9003:9001" # 控制台端口：原9001→改为9003（避开占用）
+      - "9002:9000" # 数据端口：原9000→改为9002（避开占用）
+    volumes:
+      - milvus_minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # ===== Milvus standalone=====
+  milvus:
+    image: milvusdb/milvus:v2.6.23
+    container_name: ecomkb-milvus
+    restart: unless-stopped
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+    volumes:
+      - milvus_data:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      - etcd
+      - milvus-minio
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+
+  # ===== Attu http://127.0.0.1:8000 =====
+  attu:
+    image: zilliz/attu:v2.6.0
+    container_name: ecomkb-attu
+    restart: unless-stopped
+    environment:
+      MILVUS_URL: milvus:19530
+    ports:
+      - "8000:3000"
+    depends_on:
+      - milvus
+
+  # ===== MongoDB（无鉴权模式，对齐 .env 的 MONGO_URL 不含凭据）=====
+  mongo:
+    image: mongo:7
+    container_name: ecomkb-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+volumes:
+  etcd_data:
+  milvus_minio_data:
+  milvus_data:
+  mongo_data:

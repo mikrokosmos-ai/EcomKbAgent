@@ -152,8 +152,8 @@ EcomKbAgent/
 │   │   ├── lifespan.py           #     启动/关闭时的外部客户端初始化与释放
 │   │   ├── dependencies.py       #     依赖注入：向路由提供已编译的 LangGraph 应用
 │   │   ├── routers/
-│   │   │   ├── import_router.py  #     /upload、/import.html（旧页面路由，已失效）
-│   │   │   ├── query_router.py   #     /query、/stream、/history、/health、/ 与 /query/html（旧页面路由）
+│   │   │   ├── import_router.py  #     /upload（多文件上传 + 触发导入）
+│   │   │   ├── query_router.py   #     /query、/stream、/history、/health
 │   │   │   └── task_router.py    #     /status/{task_id}（导入与查询共用）
 │   │   └── schemas/              #     Pydantic 请求/响应模型
 │   │
@@ -297,10 +297,6 @@ docker compose ps
 | Attu            | `ecomkb-attu`         | `8000`           | Milvus 可视化管理界面                           |
 | MongoDB         | `ecomkb-mongo`        | `27017`          | 会话历史存储                                   |
 
-> ⚠️ **端口冲突提示**：Attu 默认把宿主 `8000` 映射出来，而 `python main.py --service all` 也监听 `8000`。  
-> 两者同时运行时，请先修改 `docker-compose.yaml` 中 Attu 的端口映射（如 `8010:3000`），或改用 `--service import` / `--service query` 分别启动。
-
-
 ### 4.4 配置环境变量
 
 在项目根目录创建 `.env`（**切勿提交到仓库**，仓库已通过 `.gitignore` 排除）：
@@ -376,18 +372,17 @@ uvicorn app.api.app_factory:create_app --factory --reload --host 127.0.0.1 --por
 | 地址                                       | 内容             |
 | ---------------------------------------- | -------------- |
 | `http://127.0.0.1:8000/docs`             | Swagger 自动接口文档 |
+| `http://127.0.0.1:8000/`                 | 前端 SPA（生产，需先 `pnpm run build` 产出 dist/，见 4.6） |
 | `http://127.0.0.1:8001/health`           | 健康检查（后端）      |
-| `http://localhost:5173/#/chat`           | 问答对话页（React，需先起前端 dev，见 4.6） |
-| `http://localhost:5173/#/import`         | 文件导入页（React）    |
+| `http://localhost:5173/#/chat`           | 开发态问答页（React，`pnpm run dev`，见 4.6） |
+| `http://localhost:5173/#/import`         | 开发态文件导入页（React）    |
 
 > 服务启动时会强制初始化 Milvus 与 MongoDB 连接，失败将直接退出——这是刻意的"快速失败"设计，避免带着坏状态对外提供服务。  
 > MinIO 与本地模型属于可选依赖，初始化失败只会打印告警并降级。
->
-> 注：前端已重构为 React SPA（见 4.6），访问 UI 请走 Vite dev server（`http://localhost:5173`）；后端 `/import.html`、`/` 等旧页面路由当前指向已移除的 `web/` 目录，暂未挂载新 SPA，访问会 404。
 
 ### 4.6 前端开发与构建（React + pnpm）
 
-前端位于 `frontend/`，基于 React 19 + TypeScript + Vite 6。开发态由 Vite 提供 dev server（默认 `http://localhost:5173`），并把 `/import-api`、`/query-api` 两类请求代理到后端（默认 `127.0.0.1:8000`，可在 `.env` 覆盖）。生产态用 `pnpm run build` 产出静态 `dist/`，交由任意静态服务器托管。
+前端位于 `frontend/`，基于 React 19 + TypeScript + Vite 6。开发态由 Vite 提供 dev server（默认 `http://localhost:5173`），并把 `/import-api`、`/query-api` 两类请求代理到后端（默认 `127.0.0.1:8000`，可在 `.env` 覆盖）。生产态用 `pnpm run build` 产出 `dist/`，由后端 `app_factory.py` 直接托管（仅 `all` 模式，见下方说明）。
 
 ```bash
 cd frontend
@@ -415,9 +410,8 @@ pnpm run preview
 | `VITE_DEV_IMPORT_TARGET`  | `http://127.0.0.1:8000`  | 开发代理目标：后端 `all` 模式填 8000；`import` 拆分模式填 8000    |
 | `VITE_DEV_QUERY_TARGET`   | `http://127.0.0.1:8000`  | 开发代理目标：后端 `all` 模式填 8000；`query` 拆分模式填 8001     |
 
-> ⚠️ **代理坑（Windows 常见）**：本机若被注入 `HTTP_PROXY` / `HTTPS_PROXY` 等环境变量，`pnpm install` 会连接代理导致 `ECONNRESET`。安装前请用 `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pnpm install ...` 临时清空，或双击 `frontend/install-deps-pnpm.bat`（脚本已内置清空代理）。`pnpm run dev` / `pnpm run build` 本身不联网，不受此影响。
->
-> ⚠️ **生产部署待接线**：后端 `import_router` / `query_router` 仍保留 `/import.html`、`/` 等旧页面路由（指向已移除的 `web/` 目录），当前未挂载新 SPA 的 `dist/`。现阶段访问前端请走 Vite dev server（4.6）或自行用静态服务器托管 `frontend/dist/`。
+
+> ℹ️ **生产部署**：后端 `app_factory.py` 已在 `all` 模式下挂载 `frontend/dist/`（挂在所有 API 路由之后，`/` 直接返回 `index.html`）。执行 `pnpm run build`（Vite 自动读取 `frontend/.env.production`，把 API 前缀设为同源 `/`）后，直接访问 `http://127.0.0.1:8000/` 即可，无需再开 Vite。拆分模式（`import`/`query`）不挂载 SPA，仍走 Vite dev server。
 
 
 ---
@@ -500,8 +494,6 @@ curl -X DELETE "http://127.0.0.1:8001/history/demo-001"
 | -------- | ----------------------- | ------------------------------------------- |
 | `POST`   | `/upload`               | 多文件上传（form-data），每个文件生成一个 `task_id` 并触发导入流程 |
 | `GET`    | `/status/{task_id}`     | 查询任务进度（导入用 `task_id`，查询用 `session_id`）      |
-| `GET`    | `/import.html`          | 旧版导入页面路由（指向已移除的 `web/`，当前 404；请用 React 前端） |
-| `GET`    | `/`、`/query/html`       | 旧版问答页面路由（同上，已失效）                              |
 | `GET`    | `/health`               | 健康检查                                        |
 | `POST`   | `/query`                | 提问，支持 `is_stream` 切换同步/异步流式                 |
 | `GET`    | `/stream/{session_id}`  | SSE 事件流（节点进度 + 答案增量）                        |
@@ -632,33 +624,30 @@ python -m app.pipelines.import_pipeline.graph
 **Q1：启动时报 Milvus 连接失败？**  
 检查 `MILVUS_URL` 是否带了 `http://` 前缀（pymilvus 3.x 会把纯 `host:port` 判为非法），并确认 `docker compose ps` 中 Milvus 已 healthy（首次启动需 30~90 秒）。
 
-**Q2：Attu 与服务都起不来？**  
-两者默认都占用宿主 `8000` 端口。修改 `docker-compose.yaml` 中 Attu 的映射为 `8010:3000`，或用 `--service import` / `--service query` 分开启动。
-
-**Q3：导入时报 `NoSuchBucket`？**  
+**Q2：导入时报 `NoSuchBucket`？**  
 `knowledge-base-files` 桶由 `minio_client_manager.init()` 自动创建。若被手动删除，重启服务即可重建；也可以登录 `http://127.0.0.1:9001` 手动创建。
 
-**Q4：显存不足（CUDA OOM）？**  
+**Q3：显存不足（CUDA OOM）？**  
 将 `.env` 中 `BGE_DEVICE`、`BGE_RERANKER_DEVICE` 改为 `cpu`；若仍不足，可关闭 `WARMUP_ENABLE`（默认已关闭，模型为懒加载）。
 
-**Q5：图片处理阶段很慢？**  
+**Q4：图片处理阶段很慢？**  
 `node_md_img` 会对每张图片调用 VLM，且内置 60 秒 9 次的滑动窗口限速。这是为避免触发平台限流的刻意设计，批量导入大手册时请预留时间。
 
-**Q6：`doc/` 目录为什么是空的？**  
+**Q5：`doc/` 目录为什么是空的？**  
 `doc/` 存放厂商产品手册 PDF（约 85 个 / 404MB），涉及厂商文档版权且体积较大，已通过 `.gitignore` 排除。请自行放置需要入库的 PDF。
 
-**Q7：任务进度在哪里看？**  
+**Q6：任务进度在哪里看？**  
 调用 `/status/{task_id}`（导入用上传返回的 `task_id`，查询用 `session_id`），返回 `status` 与 `done_list` / `running_list`。
 
-**Q8：任务状态在重启后丢失？**  
+**Q7：任务状态在重启后丢失？**  
 当前任务追踪是单进程内存态实现。多实例部署或需要持久化时，应将其替换为 Redis 等外部存储（见路线图）。
 
-**Q9：前端页面打不开 / 白屏？**  
-前端是独立的 React 工程，需先在 `frontend/` 跑 `pnpm run dev`（默认 5173 端口）再访问 `http://localhost:5173`。直接访问后端 `8000` 端口只会得到 API 文档或（已失效的）旧页面路由。
+**Q8：前端页面打不开 / 白屏？**  
+前端是独立的 React 工程。开发态在 `frontend/` 跑 `pnpm run dev`（默认 5173 端口）再访问 `http://localhost:5173`；生产态 `pnpm run build` 后由后端直接托管，访问 `http://127.0.0.1:8000/`。若 `dist/` 未构建，后端 `/` 会 404（启动日志会打印警告）。
 
-**Q10：`pnpm install` 报错 ECONNRESET？**  
+**Q9：`pnpm install` 报错 ECONNRESET？**  
 本机若存在 `HTTP_PROXY` / `HTTPS_PROXY` 代理变量会干扰安装。用 `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pnpm install` 临时清空，或双击 `frontend/install-deps-pnpm.bat`。`dev` / `build` 不联网，不受影响。
 
-**Q11：访问 `/import.html` 或 `/` 报 404？**  
-那是旧版原生 HTML 页面（原 `web/` 目录）的遗留路由，新前端为 React SPA，请改用 Vite dev server（见 4.6 / 5.1）。后端已不再托管静态 HTML 页面。
+**Q10：访问 `/` 报 404 / 页面打不开？**  
+生产态需要先 `cd frontend && pnpm run build` 产出 `dist/`，后端（`all` 模式）才会在 `/` 挂载 SPA；`dist/` 不存在时后端会打印警告且 `/` 返回 404。旧的 `/import.html`、`/query/html` 页面路由已移除，请改走 SPA（见 4.6 / 5.1）。
 

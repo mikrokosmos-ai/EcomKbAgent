@@ -1,0 +1,4 @@
+# pnpm v10+ 项目级配置（替代 package.json 中已废弃的 pnpm 字段）
+# 允许 esbuild 执行其 build 脚本（安装平台二进制，否则 vite 构建/启动会失败）
+allowBuilds:
+  esbuild: true

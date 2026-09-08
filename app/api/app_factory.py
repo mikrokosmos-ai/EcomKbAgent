@@ -1,7 +1,9 @@
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
 
 from app.api.lifespan import lifespan
+from app.core.logger import logger, PROJECT_ROOT
 from app.api.routers.import_router import import_router
 from app.api.routers.query_router import query_router
 from app.api.routers.task_router import task_router
@@ -35,5 +37,15 @@ def create_app(include_import: bool = True, include_query: bool = True) -> FastA
         app.include_router(import_router)
     if include_query:
         app.include_router(query_router)
+
+    # 挂载前端构建产物（需先 `cd frontend && pnpm run build` 产出 dist/）
+    # 挂在所有 API 路由之后：API 优先匹配；html=True 让 "/" 直接返回 index.html
+    # 仅 all 模式（import + query 同时启用）挂载，避免拆分模式下出现半残 SPA
+    if include_import and include_query:
+        frontend_dist = PROJECT_ROOT / "frontend" / "dist"
+        if frontend_dist.is_dir():
+            app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+        else:
+            logger.warning(f"前端构建产物不存在：{frontend_dist}，请先执行 `cd frontend && pnpm run build`")
 
     return app

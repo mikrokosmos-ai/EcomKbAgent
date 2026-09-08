@@ -1,11 +1,9 @@
 import shutil
-import os
 import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import List, Any, Annotated
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File
 from app.core.logger import logger, PROJECT_ROOT
 from app.api.dependencies import get_import_pipeline
 from app.pipelines.import_pipeline.state import get_default_state
@@ -15,33 +13,6 @@ from app.utils.task_utils import (
 
 import_router = APIRouter(tags=["import"])
 router = import_router  # 兼容旧命名，避免既有 import 失效
-
-
-"""
-    接口一：返回文件导入前端页面import.html
-    url:     /import.html
-    method:  get
-    参数:    无
-    响应:    import.html (FileResponse)
-"""
-@import_router.get("/import.html", response_class=FileResponse)
-async def get_import_page():
-    """返回文件导入前端页面：import.html"""
-    # 拼接HTML文件绝对路径，基于项目根目录定位
-    html_abs_path = PROJECT_ROOT / "web" / "import.html"
-    # 日志记录页面访问的文件路径，方便排查文件不存在问题
-    logger.info(f"前端页面访问，文件绝对路径：{html_abs_path}")
-
-    # 校验文件是否存在，不存在则抛出404异常
-    if not os.path.exists(html_abs_path):
-        logger.error(f"前端页面文件不存在，路径：{html_abs_path}")
-        raise HTTPException(status_code=404, detail="import.html page not found")
-
-    # 以FileResponse返回HTML文件，浏览器自动渲染
-    return FileResponse(
-        path=html_abs_path,
-        media_type="text/html"  # 显式指定媒体类型为HTML，确保浏览器正确解析
-    )
 
 
 """

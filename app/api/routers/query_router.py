@@ -1,13 +1,11 @@
-from pathlib import Path
 import uuid
 from typing import Any, Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
-from mimetypes import guess_type
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
-from app.core.logger import logger, PROJECT_ROOT
+from app.core.logger import logger
 from app.api.schemas.query_schema import QuerySchema
 from app.api.dependencies import get_query_pipeline
 from app.pipelines.query_pipeline.state import create_query_default_state
@@ -20,27 +18,6 @@ from app.repositories.history_repo import get_recent_messages, clear_history
 
 query_router = APIRouter(tags=["query"])
 router = query_router  # 兼容旧命名，避免既有 import 失效
-
-
-# 接口1: 返回html页面
-@query_router.get("/")
-def index():
-    return return_query_html()
-
-
-@query_router.get("/query/html")
-def return_query_html():
-    # 1.拼接地址
-    html_path_obj = PROJECT_ROOT / "web" / "chat.html"
-    # 2.判断文件是否存在
-    if not html_path_obj.exists():
-        logger.error(f"html不存在,无法返回页面!")
-        raise HTTPException(status_code=404, detail=f"html不存在,无法返回页面!")
-    # 3.响应文件数据
-    return FileResponse(
-        path=html_path_obj,
-        media_type=guess_type(html_path_obj.name)[0]
-    )
 
 
 # 接口二: /health 健康检查接口

@@ -13,6 +13,10 @@
 
 ![uv](https://img.shields.io/badge/uv-managed-6C7AFF?logo=uv\&logoColor=white)
 
+![React](https://img.shields.io/badge/React-19-61DAFB?logo=react\&logoColor=white)
+
+![pnpm](https://img.shields.io/badge/pnpm-11-6C7AFF?logo=pnpm\&logoColor=white)
+
 ---
 
 ## 目录
@@ -30,6 +34,7 @@
   - [4.3 启动基础设施](#43-启动基础设施)
   - [4.4 配置环境变量](#44-配置环境变量)
   - [4.5 启动服务](#45-启动服务)
+  - [4.6 前端开发与构建（React + pnpm）](#46-前端开发与构建react--pnpm)
 - [五、基础使用](#五基础使用)
   - [5.1 Web 界面](#51-web-界面)
   - [5.2 API 调用示例](#52-api-调用示例)
@@ -82,8 +87,9 @@ EcomKbAgent 针对这三点设计：**用 MinerU 做高质量 PDF→Markdown 解
 
 | 层次         | 技术选型                                                                       |
 | ---------- | -------------------------------------------------------------------------- |
-| 语言 / 依赖管理  | Python 3.11+ 、[uv](https://docs.astral.sh/uv/)                             |
-| Web 框架     | FastAPI + Uvicorn（CORS、BackgroundTasks、SSE StreamingResponse）              |
+| 语言 / 依赖管理  | 后端 Python 3.11+ + [uv](https://docs.astral.sh/uv/)；前端 Node.js 20+ + [pnpm](https://pnpm.io/) |
+| Web 框架     | 后端 FastAPI + Uvicorn（CORS、BackgroundTasks、SSE StreamingResponse）                              |
+| 前端         | React 19 + TypeScript 5.7 + Vite 6 + Tailwind CSS 3 + react-router-dom v7 + lucide-react          |
 | 编排框架       | LangGraph（StateGraph / 条件边 / 并行分支）、LangChain（消息、OutputParser、TextSplitter） |
 | Agent 工具协议 | OpenAI Agents SDK（`openai-agents`）+ MCP Streamable HTTP                    |
 | 文档解析       | MinerU（官方 SDK / API）                                                       |
@@ -95,8 +101,6 @@ EcomKbAgent 针对这三点设计：**用 MinerU 做高质量 PDF→Markdown 解
 | 会话存储       | MongoDB（`chat_message` 集合）                                                 |
 | 日志         | Loguru（控制台 + 文件双输出，按天滚动、自动清理）                                              |
 | 基础设施       | Docker Compose（Milvus Standalone / etcd / MinIO ×2 / Attu / MongoDB）       |
-
----
 
 
 ## 二、系统架构
@@ -131,16 +135,14 @@ EcomKbAgent 针对这三点设计：**用 MinerU 做高质量 PDF→Markdown 解
    └──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
----
-
 
 ## 三、目录结构
 
 ```
 EcomKbAgent/
 ├── main.py                       # 统一服务入口：--service {all|import|query}
-├── pyproject.toml                # 项目元数据与依赖声明（uv 管理）
-├── uv.lock                       # 依赖锁定文件
+├── pyproject.toml                # 后端项目元数据与依赖声明（uv 管理）
+├── uv.lock                       # 后端依赖锁定文件
 ├── docker-compose.yaml           # 基础设施编排（Milvus / etcd / MinIO / Attu / MongoDB）
 ├── .env                          # 本地环境变量（含密钥，已在 .gitignore 中排除）
 │
@@ -150,8 +152,8 @@ EcomKbAgent/
 │   │   ├── lifespan.py           #     启动/关闭时的外部客户端初始化与释放
 │   │   ├── dependencies.py       #     依赖注入：向路由提供已编译的 LangGraph 应用
 │   │   ├── routers/
-│   │   │   ├── import_router.py  #     /upload、/import.html
-│   │   │   ├── query_router.py   #     /query、/stream、/history、/health
+│   │   │   ├── import_router.py  #     /upload、/import.html（旧页面路由，已失效）
+│   │   │   ├── query_router.py   #     /query、/stream、/history、/health、/ 与 /query/html（旧页面路由）
 │   │   │   └── task_router.py    #     /status/{task_id}（导入与查询共用）
 │   │   └── schemas/              #     Pydantic 请求/响应模型
 │   │
@@ -211,9 +213,19 @@ EcomKbAgent/
 │   ├── product_recognition_system.prompt     # 商品识别系统提示词
 │   └── answer_out.prompt                     # 最终答案生成（含引用约束）
 │
-├── web/                          # 前端页面（原生 HTML/CSS/JS，无需构建）
-│   ├── import.html               # 文件上传与导入进度页
-│   └── chat.html                 # 问答对话页（SSE 流式渲染）
+├── frontend/                     # 前端工程（React 19 + TypeScript + Vite，需构建）
+│   ├── src/                      #   源码：App、组件、hooks、lib（API 客户端）、store、types
+│   │   ├── App.tsx               #   HashRouter 路由装配：/chat、/chat/:id、/import、404
+│   │   ├── components/           #   布局（AppShell / SideNav / TopBar）、chat、importer、ui
+│   │   ├── hooks/                #   useChat / useImportPoller / useHealth 等
+│   │   ├── lib/                  #   kbApi（7 个接口封装）、http、sse、session、storage
+│   │   └── store/                #   SessionProvider（会话状态）
+│   ├── package.json              #   pnpm 管理，scripts: dev / build / preview / lint
+│   ├── pnpm-workspace.yaml       #   pnpm v10+ 配置（allowBuilds: esbuild）
+│   ├── pnpm-lock.yaml            #   前端依赖锁定文件
+│   ├── vite.config.ts            #   开发代理：/import-api→8000、/query-api→8001
+│   ├── .npmrc                    #   镜像源（registry.npmmirror.com）
+│   └── .env.example              #   VITE_IMPORT_API / VITE_QUERY_API 等
 │
 ├── doc/                          # 本地知识库语料（*.pdf，默认不入库，见 .gitignore）
 ├── output/                       # 运行时产物：按 日期/任务ID 分层的中间文件
@@ -221,7 +233,6 @@ EcomKbAgent/
 └── volumes/                      # Docker 挂载数据卷（MinIO 数据）
 ```
 
----
 
 ## 四、快速开始
 
@@ -231,7 +242,9 @@ EcomKbAgent/
 | ---------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
 | 操作系统       | Windows / Linux / macOS                                               | Windows 已在 Python 3.11.9 + Docker Desktop 验证                                            |
 | Python     | **3.11 及以上**                                                          | `pyproject.toml` 声明 `requires-python = ">=3.11"`                                        |
-| 包管理器       | [uv](https://docs.astral.sh/uv/)                                      | 推荐；也可用 pip + venv                                                                       |
+| Node.js    | **20 及以上**                                                            | 前端构建工具 Vite 6 的运行要求                                                                 |
+| 包管理器（后端） | [uv](https://docs.astral.sh/uv/)                                      | 推荐；也可用 pip + venv                                                                       |
+| 包管理器（前端） | [pnpm](https://pnpm.io/)（v11，需 Node.js ≥ 20）                          | 前端依赖管理；镜像走 `frontend/.npmrc`（npmmirror）                                                |
 | Docker     | Docker Desktop / Engine + Compose v2                                  | 用于 Milvus、MinIO、MongoDB、Attu                                                            |
 | GPU（可选但推荐） | NVIDIA GPU + CUDA 13.0 驱动                                             | BGE-M3 与 bge-reranker-large 本地推理；无 GPU 请将 `BGE_DEVICE` / `BGE_RERANKER_DEVICE` 改为 `cpu` |
 | 外部服务账号     | MinerU API Token、OpenAI 兼容 LLM API Key（默认 DashScope）、百炼 WebSearch MCP | 见 4.4                                                                                   |
@@ -244,7 +257,7 @@ EcomKbAgent/
 git clone https://github.com/mikrokosmos-ai/EcomKbAgent.git
 cd EcomKbAgent
 
-# 2) 创建虚拟环境并安装依赖（uv 会读取 pyproject.toml + uv.lock）
+# 2) 创建虚拟环境并安装后端依赖（uv 会读取 pyproject.toml + uv.lock）
 uv venv                 # 默认创建 .venv（Python 3.11）
 uv sync                 # 安装锁定版本的全部依赖
 
@@ -358,17 +371,54 @@ python main.py --service query
 uvicorn app.api.app_factory:create_app --factory --reload --host 127.0.0.1 --port 8000
 ```
 
-启动后访问：
+启动后访问（后端 API 与文档）：
 
 | 地址                                       | 内容             |
 | ---------------------------------------- | -------------- |
 | `http://127.0.0.1:8000/docs`             | Swagger 自动接口文档 |
-| `http://127.0.0.1:8000/import.html`      | 文件导入页面         |
-| `http://127.0.0.1:8001/` 或 `/query/html` | 问答对话页面         |
-| `http://127.0.0.1:8001/health`           | 健康检查           |
+| `http://127.0.0.1:8001/health`           | 健康检查（后端）      |
+| `http://localhost:5173/#/chat`           | 问答对话页（React，需先起前端 dev，见 4.6） |
+| `http://localhost:5173/#/import`         | 文件导入页（React）    |
 
 > 服务启动时会强制初始化 Milvus 与 MongoDB 连接，失败将直接退出——这是刻意的"快速失败"设计，避免带着坏状态对外提供服务。  
 > MinIO 与本地模型属于可选依赖，初始化失败只会打印告警并降级。
+>
+> 注：前端已重构为 React SPA（见 4.6），访问 UI 请走 Vite dev server（`http://localhost:5173`）；后端 `/import.html`、`/` 等旧页面路由当前指向已移除的 `web/` 目录，暂未挂载新 SPA，访问会 404。
+
+### 4.6 前端开发与构建（React + pnpm）
+
+前端位于 `frontend/`，基于 React 19 + TypeScript + Vite 6。开发态由 Vite 提供 dev server（默认 `http://localhost:5173`），并把 `/import-api`、`/query-api` 两类请求代理到后端（默认 `127.0.0.1:8000`，可在 `.env` 覆盖）。生产态用 `pnpm run build` 产出静态 `dist/`，交由任意静态服务器托管。
+
+```bash
+cd frontend
+
+# 1) 安装依赖（依赖管理走 pnpm，镜像见 .npmrc）
+#    若所在环境存在 HTTP(S)_PROXY 干扰，先清空再装：
+pnpm install --registry=https://registry.npmmirror.com
+
+# 2) 启动开发服务器（纯本地，不联网；默认 5173 端口）
+pnpm run dev
+
+# 3) 类型检查 + 生产构建（产出 frontend/dist/）
+pnpm run build
+
+# 4) 预览构建产物
+pnpm run preview
+```
+
+常见环境变量（写在 `frontend/.env`，参考 `.env.example`）：
+
+| 变量                        | 默认值                     | 说明                                                  |
+| ------------------------- | ------------------------ | --------------------------------------------------- |
+| `VITE_IMPORT_API`         | `/import-api`            | 导入接口前缀（经 Vite 代理到后端 8000）                          |
+| `VITE_QUERY_API`          | `/query-api`             | 查询接口前缀（经 Vite 代理到后端 8000/8001）                   |
+| `VITE_DEV_IMPORT_TARGET`  | `http://127.0.0.1:8000`  | 开发代理目标：后端 `all` 模式填 8000；`import` 拆分模式填 8000    |
+| `VITE_DEV_QUERY_TARGET`   | `http://127.0.0.1:8000`  | 开发代理目标：后端 `all` 模式填 8000；`query` 拆分模式填 8001     |
+
+> ⚠️ **代理坑（Windows 常见）**：本机若被注入 `HTTP_PROXY` / `HTTPS_PROXY` 等环境变量，`pnpm install` 会连接代理导致 `ECONNRESET`。安装前请用 `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pnpm install ...` 临时清空，或双击 `frontend/install-deps-pnpm.bat`（脚本已内置清空代理）。`pnpm run dev` / `pnpm run build` 本身不联网，不受此影响。
+>
+> ⚠️ **生产部署待接线**：后端 `import_router` / `query_router` 仍保留 `/import.html`、`/` 等旧页面路由（指向已移除的 `web/` 目录），当前未挂载新 SPA 的 `dist/`。现阶段访问前端请走 Vite dev server（4.6）或自行用静态服务器托管 `frontend/dist/`。
+
 
 ---
 
@@ -376,11 +426,17 @@ uvicorn app.api.app_factory:create_app --factory --reload --host 127.0.0.1 --por
 
 ### 5.1 Web 界面
 
-1. 启动基础设施与服务后打开 `http://127.0.0.1:8000/import.html`；
-2. 选择一个或多个 PDF / Markdown 文件，点击上传；
-3. 页面会用返回的 `task_id` 轮询 `/status/{task_id}`，实时展示已完成节点（检查文件 → PDF转Markdown → Markdown图片处理 → 文档切分 → 主体名称识别 → 向量生成 → 导入向量库）；
-4. 导入完成后打开 `http://127.0.0.1:8001/`，即可基于知识库问答，答案会附带来源与配图链接。
+前端为单页应用（SPA），使用 HashRouter，两个主页面通过左侧导航 / 移动端底栏互跳：
 
+- **问答页**（`#/chat`、`#/chat/:sessionId`）：基于知识库提问，支持多轮会话、流式逐字输出、节点级流水线进度（检查文件 → PDF转Markdown → 图片处理 → 文档切分 → 主体识别 → 向量生成 → 导入），答案附带来源引用与配图链接；左侧为会话列表，可新建 / 切换 / 清空历史。
+- **导入页**（`#/import`）：上传 PDF / Markdown，实时展示导入任务进度与节点状态，导入完成即可回到问答页提问。
+
+访问步骤：
+
+1. 启动基础设施（4.3）与后端服务（4.5，`python main.py --service all`）；
+2. 在 `frontend/` 目录执行 `pnpm run dev`，打开 `http://localhost:5173/#/chat`；
+3. 首次使用先到 `#/import` 上传商品手册，等待进度完成；
+4. 回到 `#/chat` 提问，答案会附带来源与配图链接。
 
 ### 5.2 API 调用示例
 
@@ -444,15 +500,16 @@ curl -X DELETE "http://127.0.0.1:8001/history/demo-001"
 | -------- | ----------------------- | ------------------------------------------- |
 | `POST`   | `/upload`               | 多文件上传（form-data），每个文件生成一个 `task_id` 并触发导入流程 |
 | `GET`    | `/status/{task_id}`     | 查询任务进度（导入用 `task_id`，查询用 `session_id`）      |
-| `GET`    | `/import.html`          | 导入页面                                        |
-| `GET`    | `/`、`/query/html`       | 问答页面                                        |
+| `GET`    | `/import.html`          | 旧版导入页面路由（指向已移除的 `web/`，当前 404；请用 React 前端） |
+| `GET`    | `/`、`/query/html`       | 旧版问答页面路由（同上，已失效）                              |
 | `GET`    | `/health`               | 健康检查                                        |
 | `POST`   | `/query`                | 提问，支持 `is_stream` 切换同步/异步流式                 |
 | `GET`    | `/stream/{session_id}`  | SSE 事件流（节点进度 + 答案增量）                        |
 | `GET`    | `/history/{session_id}` | 获取最近 N 条会话记录（默认 10）                         |
 | `DELETE` | `/history/{session_id}` | 清空指定会话的历史记录                                 |
 
-> `session_id` 需匹配 `[A-Za-z0-9-]{1,64}`；不传时服务端自动生成 UUID。
+> `session_id` 需匹配 `[A-Za-z0-9-]{1,64}`；不传时服务端自动生成 UUID。  
+> 前端通过 Vite 代理以 `/import-api`、`/query-api` 前缀调用上述接口（见 4.6）。
 
 ---
 
@@ -513,8 +570,8 @@ curl -X DELETE "http://127.0.0.1:8001/history/demo-001"
 | `app/core/rate_limit.py`  | 滑动窗口限速（默认 60 秒 9 次），用于 VLM/LLM 调用保护                                                |
 | `app/repositories/`       | 数据访问封装：MongoDB 会话历史、Milvus 混合检索与按 ID 批量取回                                          |
 
----
 
+---
 
 ## 七、开发指南
 
@@ -526,6 +583,7 @@ curl -X DELETE "http://127.0.0.1:8001/history/demo-001"
 4. **配置集中**：新增外部服务时在 `app/conf/` 下新增 dataclass 配置，从 `.env` 读取，并在 README 配置表中登记。
 5. **客户端收敛**：所有外部连接通过 `app/clients/manager/` 的单例管理器创建，并在 `lifespan` 中按"必需 / 可选"分级初始化。
 6. **本地自测**：每个节点文件底部保留 `if __name__ == "__main__":` 自测入口，便于单独跑通。
+7. **前端规范**：React 组件按 `components/{layout,chat,importer,ui}` 分层；API 调用统一收敛到 `lib/kbApi.ts`，禁止在组件里直接 `fetch` 裸写地址；新增接口请在 `lib/types` 同步类型。
 
 新增一个查询节点的典型步骤：
 
@@ -595,11 +653,12 @@ python -m app.pipelines.import_pipeline.graph
 **Q8：任务状态在重启后丢失？**  
 当前任务追踪是单进程内存态实现。多实例部署或需要持久化时，应将其替换为 Redis 等外部存储（见路线图）。
 
+**Q9：前端页面打不开 / 白屏？**  
+前端是独立的 React 工程，需先在 `frontend/` 跑 `pnpm run dev`（默认 5173 端口）再访问 `http://localhost:5173`。直接访问后端 `8000` 端口只会得到 API 文档或（已失效的）旧页面路由。
 
+**Q10：`pnpm install` 报错 ECONNRESET？**  
+本机若存在 `HTTP_PROXY` / `HTTPS_PROXY` 代理变量会干扰安装。用 `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy pnpm install` 临时清空，或双击 `frontend/install-deps-pnpm.bat`。`dev` / `build` 不联网，不受影响。
 
-
-
-
-
-
+**Q11：访问 `/import.html` 或 `/` 报 404？**  
+那是旧版原生 HTML 页面（原 `web/` 目录）的遗留路由，新前端为 React SPA，请改用 Vite dev server（见 4.6 / 5.1）。后端已不再托管静态 HTML 页面。
 

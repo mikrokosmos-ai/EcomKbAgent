@@ -7,9 +7,114 @@ from app.prompts.loader import load_prompt
 from app.clients.llm_client import get_llm_client
 from app.repositories.history_repo import save_chat_message
 import re
+from urllib.parse import urlparse
 
 _IMAGE_BLOCK_MARKER = "【图片】"
 MAX_CONTEXT_CHARS = 12000
+# 证据区分块预算：本地 + 联网 + 历史 = MAX_CONTEXT_CHARS，三段互不挤占
+LOCAL_EVIDENCE_BUDGET = 8000
+WEB_EVIDENCE_BUDGET = 2500
+HISTORY_BUDGET = MAX_CONTEXT_CHARS - LOCAL_EVIDENCE_BUDGET - WEB_EVIDENCE_BUDGET
+
+# -----------------------------
+# 图片域名白名单：只允许输出本库 MinIO 上的图片，阻断外链注入
+# -----------------------------
+try:
+    from app.conf.minio_config import minio_config
+
+    _IMAGE_HOST = (minio_config.endpoint or "").replace("http://", "").replace("https://", "").strip("/")
+    _IMAGE_PATH_PREFIX = f"/{minio_config.bucket_name}/" if minio_config.bucket_name else "/"
+except Exception as _e:
+    # 配置缺失时 fail-closed：不信任任何图片 URL，避免退化成"全部放行"
+    logger.warning(f"MinIO 配置加载失败，图片白名单为空（将拒绝所有图片 URL）: {_e}")
+    _IMAGE_HOST = ""
+    _IMAGE_PATH_PREFIX = "/"
+
+# 零宽 / 双向控制字符：常被用于在资料中隐藏指令
+_ZERO_WIDTH_RE = re.compile(r'[\u200b-\u200f\u202a-\u202e\u2060\ufeff]')
+_URL_RE = re.compile(r'https?://[^\s，。；、（）【】「」]+')
+_URL_TAIL_PUNCT_RE = re.compile(r'[)\]}\'">，。,;；】）＞]+$')
+
+
+def _sanitize_evidence_text(text: str) -> str:
+    """
+    C3 消毒：对进入 Prompt 的外部资料做无害化处理。
+    1. 剥离零宽 / 双向控制字符（隐藏指令的常用载体）。
+    2. 尖括号替换为全角，防止资料中出现 </本地知识库证据> 之类的闭合标签逃逸。
+    """
+    if not text:
+        return ""
+    text = _ZERO_WIDTH_RE.sub('', text)
+    return text.replace('<', '＜').replace('>', '＞')
+
+
+def _split_docs_by_type(reranked_docs):
+    """
+    C1 分流：按 type 字段把重排结果拆成本地证据与联网证据。
+    约定：type == "milvus" 为本地知识库；其余（web / 缺失 / 未知）一律归入
+    最低信任的联网区 —— 默认值 fail-safe，宁可少信不可多信。
+    """
+    local_docs, web_docs = [], []
+    for doc in reranked_docs or []:
+        if doc.get("type") == "milvus":
+            local_docs.append(doc)
+        else:
+            web_docs.append(doc)
+    return local_docs, web_docs
+
+
+def _build_evidence(docs, index_prefix: str, budget: int) -> str:
+    """把一组文档拼成单个证据区字符串；超出预算即停止，返回已拼部分。"""
+    blocks = []
+    used = 0
+    for i, doc in enumerate(docs, start=1):
+        text = _sanitize_evidence_text((doc.get("text") or "").strip())
+        if not text:
+            continue
+        meta_parts = [f"[{index_prefix}{i}]"]
+        title = (doc.get("title") or "").strip()
+        if title:
+            meta_parts.append(f"[title={title}]")
+        score = doc.get("score")
+        if score is not None:
+            try:
+                meta_parts.append(f"[score={float(score):.4f}]")
+            except (TypeError, ValueError):
+                pass
+        url = (doc.get("url") or "").strip()
+        if url:
+            meta_parts.append(f"[url={url}]")
+        block = " ".join(meta_parts) + "\n" + text
+        if used + len(block) > budget:
+            break
+        blocks.append(block)
+        used += len(block) + 2
+    return "\n\n".join(blocks)
+
+
+def _build_history(history, budget: int) -> str:
+    """
+    历史对话独立预算，避免与证据区互相挤占。
+    修复：原实现在循环内执行 `used += len(history_str)`，而 history_str 是累加串，
+    导致 used 被重复计数，历史被过早截断甚至整段丢弃。
+    历史内容同样做消毒，防止多轮注入。
+    """
+    lines = []
+    used = 0
+    for msg in history or []:
+        role = msg.get("role")
+        text = msg.get("text")
+        if role == "user" and text:
+            line = f"用户: {_sanitize_evidence_text(text)}\n"
+        elif role == "assistant" and text:
+            line = f"助手: {_sanitize_evidence_text(text)}\n"
+        else:
+            continue
+        if used + len(line) > budget:
+            break
+        lines.append(line)
+        used += len(line)
+    return "".join(lines) if lines else "无历史对话"
 
 @step_log("step_1_check_answer")
 def step_1_check_answer(state) -> bool:
@@ -52,82 +157,39 @@ def step_2_construct_prompt(state: QueryGraphState) -> str:
     item_names = state.get("item_names", [])
     reranked_docs = state.get("reranked_docs") or []
 
-    # 2 从重排内容中，提取为资料字符串，不可超过限额
-    # 优先使用结构化 reranked_docs（包含 source/chunk_id/url/score），便于约束与引用
+    # 2 按来源分流：本地知识库（高信任）与联网结果（低信任）分别成区
     # ---------------------------------------------------------
     # 逻辑解释：
-    # 1. 遍历重排序后的文档列表 (reranked_docs)，这些文档已经按相关性从高到低排序。
-    # 2. 对每个文档提取关键信息 (text, source, chunk_id, url, title, score)。
-    # 3. 构造 "元数据头 + 正文" 格式的字符串，例如：
-    #    "[1] [local] [chunk_id=123] [score=0.95] [title=操作手册]
-    #     这里是文档的正文内容..."
-    # 4. 累加字符长度，如果超过 MAX_CONTEXT_CHARS (如 12000 字符)，则停止添加，
-    #    确保 Prompt 长度在 LLM 的处理范围内，避免 Token 溢出。
+    # 1. reranked_docs 每条带 type 字段：milvus=本地知识库，web=联网结果。
+    #    注意：本节点原实现读取的 source / chunk_id 字段在重排后并不存在（恒为空），
+    #    真正的来源标识是 type，这里改用 type 分流。
+    # 2. 两段证据各自独立预算（LOCAL_EVIDENCE_BUDGET / WEB_EVIDENCE_BUDGET），
+    #    避免联网 snippet 与本地手册互相挤占。
+    # 3. 未知 / 缺失 type 一律归入联网区（最低信任），默认 fail-safe。
     # ---------------------------------------------------------
-    docs = []
-    used = 0
-    for i, doc in enumerate(reranked_docs, start=1):
-        text = (doc.get("text") or "").strip()
-        if not text:
-            continue
-        source = doc.get("source") or ""
-        chunk_id = doc.get("chunk_id")
-        url = (doc.get("url") or "").strip()
-        title = (doc.get("title") or "").strip()
-        score = doc.get("score")
+    local_docs, web_docs = _split_docs_by_type(reranked_docs)
 
-        meta_parts = [f"[{i}]"]
-        if source:
-            meta_parts.append(f"[{source}]")
-        if chunk_id:
-            meta_parts.append(f"[chunk_id={chunk_id}]")
-        if url:
-            meta_parts.append(f"[url={url}]")
-        if score is not None:
-            # 保留四位小数
-            meta_parts.append(f"[score={float(score):.4f}]")
-        if title:
-            meta_parts.append(f"[title={title}]")
-        doc = " ".join(meta_parts) + "\n" + text
-        if used + len(doc) > MAX_CONTEXT_CHARS:
-            break
-        docs.append(doc)
-        # 计算使用长度！ + 2 两个\n\n
-        used += len(doc) + 2
-    context_str = "\n\n".join(docs) if docs else "无参考内容"
+    local_evidence = _build_evidence(local_docs, "", LOCAL_EVIDENCE_BUDGET) \
+        or "（本次未检索到本地知识库内容，请如实说明未找到，不要推测。）"
+    web_evidence = _build_evidence(web_docs, "W", WEB_EVIDENCE_BUDGET) \
+        or "（本次无联网补充资料。）"
 
     # 3. 格式化 History (历史对话)
     # ---------------------------------------------------------
     # 逻辑解释：
-    # 1. 遍历历史对话记录 (history)。
-    # 2. 将每轮对话格式化为 "用户: ... \n 助手: ..." 的文本块。
-    # 3. 同样进行长度累加判断 (used)，确保历史记录+参考文档的总长度不超过 MAX_CONTEXT_CHARS。
-    #    注意：这里的 used 变量是接着上面处理文档后的长度继续累加的，
-    #    意味着如果文档占用了太多 Token，历史记录可能会被截断或完全丢弃。
+    # 1. 遍历历史对话记录 (history)，格式化为 "用户: ... \n 助手: ..." 的文本块。
+    # 2. 历史区改用独立预算 HISTORY_BUDGET，不再与证据区共用计数器。
+    # 3. 历史内容同样做消毒，防止多轮注入。
     # ---------------------------------------------------------
-    history_str = ""
-    if history:
-        for msg in history:
-            # 修正：MongoDB存储格式为 {"role": "user"/"assistant", "text": "..."}
-            role = msg.get("role")
-            text = msg.get("text")
-            if role == "user" and text:
-                history_str += f"用户: {text}\n"
-            elif role == "assistant" and text:
-                history_str += f"助手: {text}\n"
-
-            used += len(history_str) + 2
-            if used > MAX_CONTEXT_CHARS:
-                break
-    else:
-        history_str = "无历史对话"
+    history_str = _build_history(history, HISTORY_BUDGET)
 
     # 4. 格式化 Item Names (提问商品)
     item_names_str = ", ".join(item_names) if item_names else "无指定商品"
 
     # 5. 组装 Prompt
     prompt = load_prompt("answer_out",
-                         context=context_str,
+                         local_evidence=local_evidence,
+                         web_evidence=web_evidence,
                          history=history_str,
                          item_names=item_names_str,
                          question=question
@@ -211,7 +273,10 @@ def _extract_images_from_docs(docs):
     if not docs:
         return []
 
-    md_img_pattern = re.compile(r'!\[.*?\]\((.*?)\)')
+    # 注意：图片 alt 文本常含换行（图片摘要由 LLM 生成，是多行内容），
+    # 必须启用 DOTALL，否则 alt 跨行的图片会被整段漏掉。
+    # 实测：本地知识库 24 张图片中，不启用时会漏掉 5 张。
+    md_img_pattern = re.compile(r'!\[.*?\]\((.*?)\)', re.DOTALL)
 
     logger.info(f"开始提取图片，待处理文档数: {len(docs)}")
 
@@ -284,6 +349,59 @@ def _extract_images_from_answer(answer: str) -> list:
                 images.append(url)
     return images
 
+def _is_trusted_image_url(url: str) -> bool:
+    """
+    C4 图片域名白名单校验：必须是本库 MinIO（endpoint + bucket）下的地址。
+    配置缺失时 _IMAGE_HOST 为空，本函数恒返回 False（fail-closed）。
+    """
+    if not url:
+        return False
+    u = str(url).strip()
+    if not u.lower().startswith(("http://", "https://")):
+        return False
+    try:
+        parsed = urlparse(u)
+    except Exception:
+        return False
+    if not _IMAGE_HOST or parsed.netloc.lower() != _IMAGE_HOST.lower():
+        return False
+    return parsed.path.startswith(_IMAGE_PATH_PREFIX)
+
+
+def _strip_untrusted_links(answer: str) -> str:
+    """
+    C5 输出侧清洗，针对"答案正文里的普通外链"这一 prompt 够不到的缺口：
+    1. 正文（【图片】区块之前）：非白名单 URL 替换为「【已移除外部链接】」；
+       白名单（本库 MinIO）URL 原样保留。
+    2. 【图片】区块内：整行剔除含非白名单 URL 的行，避免前端渲染外链图片。
+    """
+    if not answer:
+        return answer
+
+    markers = list(re.finditer(r'【\s*图片\s*】|\[\s*图片\s*\]', answer))
+    if markers:
+        body = answer[:markers[-1].start()]
+        tail = answer[markers[-1].start():]
+    else:
+        body, tail = answer, ""
+
+    def _mask(match):
+        url = _URL_TAIL_PUNCT_RE.sub('', match.group(0)).strip()
+        return url if _is_trusted_image_url(url) else "【已移除外部链接】"
+
+    body = _URL_RE.sub(_mask, body)
+
+    if tail:
+        kept_lines = []
+        for line in tail.splitlines():
+            urls = [_URL_TAIL_PUNCT_RE.sub('', u).strip() for u in _URL_RE.findall(line)]
+            if urls and not all(_is_trusted_image_url(u) for u in urls):
+                continue
+            kept_lines.append(line)
+        tail = "\n".join(kept_lines)
+    return body + tail
+
+
 @step_log("step_4_write_history")
 def step_4_write_history(state: QueryGraphState, image_urls=None) -> QueryGraphState:
     """
@@ -343,8 +461,23 @@ def node_answer_output(state: QueryGraphState) -> QueryGraphState:
     # 提取图片URL（用于历史记录和前端展示）
     # 以 LLM 答案中显式书写的【图片】区块为准；无区块则返回空列表，
     # 避免"每问必出图 / 图片与答案无关"的问题。
-    answer_text = (state.get("answer") or "").strip()
-    candidate_images = _extract_images_from_docs(state.get("reranked_docs") or [])
+    # C5：先对答案做输出侧清洗（正文非白名单外链替换、【图片】区非白名单 URL 整行剔除）
+    raw_answer = (state.get("answer") or "").strip()
+    safe_answer = _strip_untrusted_links(raw_answer)
+    if safe_answer != raw_answer:
+        logger.warning("答案中检出非白名单外链，已做清洗处理")
+        state["answer"] = safe_answer
+        # 非流式路径下 step_3 已把原始答案写入 task_result，这里同步为清洗后的版本，
+        # 否则轮询结果的调用方拿到的仍是未经清洗的答案。
+        if not state.get("is_stream"):
+            set_task_result(state["session_id"], "answer", safe_answer)
+    answer_text = safe_answer
+
+    # C4：候选图片只取本地知识库证据（type=milvus），并叠加域名白名单。
+    # 修复：原实现把 web 结果也纳入候选，导致外部图片 URL 能通过交集校验。
+    local_docs, _ = _split_docs_by_type(state.get("reranked_docs") or [])
+    candidate_images = [u for u in _extract_images_from_docs(local_docs)
+                        if _is_trusted_image_url(u)]
     answer_images = _extract_images_from_answer(answer_text)
 
     # 与检索到的候选图片做交集：过滤 LLM 可能幻觉编造的 URL，
@@ -388,33 +521,33 @@ if __name__ == "__main__":
     # 1. 构造模拟数据
     # 模拟重排序后的文档列表 (reranked_docs)
     # 包含：本地文档（带Markdown图片）、联网结果（带URL字段）、纯文本文档
+    # 注意：来源标识字段是 type（milvus=本地知识库 / web=联网结果）。
+    # 重排节点不会产出 source / chunk_id（原 mock 用的 source 恒为空），
+    # mock 数据需与真实结构一致，否则会全部落到最低信任的联网区。
     mock_reranked_docs = [
         {
-            "chunk_id": "local_101",
-            "source": "local",
+            "type": "milvus",
             "title": "HAK 180 烫金机操作手册_v2.pdf",
             "score": 0.95,
             "text": """
             HAK 180 烫金机的操作面板位于机器正前方。
             开启电源后，您需要先设置温度，默认建议设置在 110℃ 左右。
             具体的操作面板布局请参考下图：
-            ![操作面板布局图](http://local-server/images/panel_view.jpg)
+            ![操作面板布局图](http://127.0.0.1:9000/knowledge-base-files/upload-images/panel_view.jpg)
 
             如果是进行局部烫金，请调节侧面的旋钮。
-            ![侧面旋钮细节](http://local-server/images/knob_detail.png)
+            ![侧面旋钮细节](http://127.0.0.1:9000/knowledge-base-files/upload-images/knob_detail.png)
             """
         },
         {
-            "chunk_id": None,
-            "source": "web",
+            "type": "web",
             "title": "HAK 180 常见故障排除 - 官网",
             "score": 0.88,
-            "url": "http://example.com/hak180_troubleshooting.jpeg",  # 这是一个直接指向图片的URL（虽然少见，但用于测试提取）
+            "url": "http://example.com/hak180_troubleshooting.jpeg",  # 联网结果的图片，按设计不参与图片候选
             "text": "如果机器无法加热，请检查保险丝是否熔断..."
         },
         {
-            "chunk_id": "local_102",
-            "source": "local",
+            "type": "milvus",
             "title": "安全注意事项",
             "score": 0.82,
             "text": "操作时请务必佩戴隔热手套，避免高温烫伤。"
@@ -464,17 +597,13 @@ if __name__ == "__main__":
             print(f"[WARN] 答案生成可能异常 (Content: {answer})")
 
         # 3. 验证图片提取
-        # 我们期望提取到 3 张图片：
-        # 1. http://local-server/images/panel_view.jpg (来自 local_101)
-        # 2. http://local-server/images/knob_detail.png (来自 local_101)
-        # 3. http://example.com/hak180_troubleshooting.jpeg (来自 web 结果的 url 字段)
-
-        # 注意：这里我们没办法直接从 result state 里拿到 image_urls，因为它是作为 SSE 推送出去的，或者存库了
-        # 但我们可以通过日志观察 _extract_images_from_docs 的输出
-        # 如果需要验证，可以临时修改 node_answer_output 返回 image_urls
-        print("\n[INFO] 请检查上方日志中是否包含 '图片提取完成' 及以下 URL:")
-        print(" - http://local-server/images/panel_view.jpg")
-        print(" - http://local-server/images/knob_detail.png")
+        # 期望：只有 type=milvus 且命中 MinIO 白名单（host + bucket 路径）的图片进入候选，
+        # 即下面 2 张；联网结果的图片按设计被排除，用于阻断外链注入。
+        print(f"\n[INFO] 最终 image_urls = {result.get('image_urls')}")
+        print("[INFO] 白名单内本地图片（应出现在候选中）:")
+        print(" - http://127.0.0.1:9000/knowledge-base-files/upload-images/panel_view.jpg")
+        print(" - http://127.0.0.1:9000/knowledge-base-files/upload-images/knob_detail.png")
+        print("[INFO] 联网图片（不应出现在候选中）:")
         print(" - http://example.com/hak180_troubleshooting.jpeg")
 
         print("=" * 50)

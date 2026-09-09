@@ -1,6 +1,3 @@
-"""
-    节点作用: 接收传入的文件地址(local_file_path)识别文件类型,修改对应的state
-"""
 import sys
 from pathlib import Path
 from app.core.logger import logger, node_log

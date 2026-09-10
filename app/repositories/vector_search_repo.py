@@ -98,7 +98,8 @@ def create_hybrid_search_requests(dense_vector, sparse_vector, dense_params=None
     :param limit: 单向量搜索返回结果数量，默认5
     :return: 搜索请求列表，包含[dense_req, sparse_req]
     """
-    # 稠密向量默认搜索参数：余弦相似度（COSINE），适配BGE-M3稠密向量并与建库参数保持一致
+
+    # 稠密向量默认搜索参数：内积（IP）
     if dense_params is None:
         dense_params = {"metric_type": "IP"}
     # 稀疏向量默认搜索参数：内积（IP），适配BGE-M3稀疏向量

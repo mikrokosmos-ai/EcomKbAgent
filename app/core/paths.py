@@ -1,4 +1,3 @@
-# app/utils/path_util.py
 from pathlib import Path
 from dotenv import load_dotenv
 import os

@@ -145,6 +145,7 @@ EcomKbAgent/
 ├── uv.lock                       # 后端依赖锁定文件
 ├── docker-compose.yaml           # 基础设施编排（Milvus / etcd / MinIO / Attu / MongoDB）
 ├── .env                          # 本地环境变量（含密钥，已在 .gitignore 中排除）
+├── .env.example                  # 环境变量样例（脱敏占位符，可提交；cp .env.example .env 后填写）
 │
 ├── app/
 │   ├── api/                      # ── 接口层 ──
@@ -195,6 +196,7 @@ EcomKbAgent/
 │   │
 │   ├── core/
 │   │   ├── logger.py             #     Loguru 配置 + @node_log / @step_log 装饰器
+│   │   ├── exceptions.py         #     领域异常体系：AppError 基类 + 配置/导入/查询/存储四支
 │   │   ├── paths.py              #     PROJECT_ROOT 探测（.env 作为根目录标识）
 │   │   └── rate_limit.py         #     滑动窗口限速器
 │   │
@@ -302,8 +304,11 @@ docker compose ps
 在项目根目录创建 `.env`（**切勿提交到仓库**，仓库已通过 `.gitignore` 排除）：
 
 ```bash
-cp .env.example .env   # 若仓库未提供，请按下表手动创建
+cp .env.example .env        # 直接由样例文件生成，再按实际环境填写各项值
 ```
+
+`.env.example` 已随仓库提供，含**全部变量的键名与格式说明**（值均为占位符，可安全提交）。
+填写时请保持键名不变；如新增变量，请同步在本节配置表中登记。
 
 | 分类        | 变量                                          | 示例                                                         | 说明                                                  |
 | --------- | ------------------------------------------- | ---------------------------------------------------------- | --------------------------------------------------- |
@@ -337,7 +342,8 @@ cp .env.example .env   # 若仓库未提供，请按下表手动创建
 |           | `MONGO_DB_NAME`                             | `knowledge_db_history`                                     | 数据库名                                                |
 | 可选        | `WARMUP_ENABLE`                             | `false`                                                    | 设为 `true` 可在启动时预加载 Embedding / Reranker 本地模型（默认懒加载） |
 
-> 说明：`ENTITY_NAME_COLLECTION`、`EMBEDDING_DIM`、`MILVUS_METRIC_TYPE`、`MILVUS_MIN_COSINE_SCORE` 目前为预留配置项，代码尚未读取；切片集合的稠密向量维度在 `node_import_milvus.py` 中固定为 **1024**（BGE-M3 原生维度）。
+> 说明：`ENTITY_NAME_COLLECTION`、`EMBEDDING_DIM`、`MILVUS_METRIC_TYPE`、`MILVUS_MIN_COSINE_SCORE`、`MILVUS_USER`、`MILVUS_PASSWORD` 目前为**预留配置项**，代码尚未读取（当前 `docker-compose.yaml` 的 Milvus 未开启鉴权）；切片集合的稠密向量维度在 `node_import_milvus.py` 中固定为 **1024**（BGE-M3 原生维度）。
+> 另：`MINERU_MODEL_SOURCE`、`MODELSCOPE_CACHE`、`MODELSCOPE_OFFLINE`、`HF_HOME`、`MD_ROOT_DIR` 由 MinerU / ModelScope / HuggingFace 等第三方库隐式读取，代码中不显式 `os.getenv`。
 
 首次运行建议先预下载模型（以 ModelScope 为例）：
 
@@ -557,6 +563,7 @@ curl -X DELETE "http://127.0.0.1:8001/history/demo-001"
 | ------------------------- | ---------------------------------------------------------------------------------- |
 | `app/clients/manager/*`   | 各外部客户端的单例管理器，统一 `init()` / `close()`；门面函数（如 `get_llm_client()`）在 client 为空时自动懒加载兜底 |
 | `app/core/logger.py`      | Loguru 双通道日志；`@node_log` / `@step_log` 装饰器自动打印节点与步骤的进入、耗时、异常                       |
+| `app/core/exceptions.py`  | 领域异常体系：`AppError` 基类（携带 `node_name` / `cause`），下设配置、导入、查询、存储四支；`StateFieldError` 额外结构化字段名与期望类型 |
 | `app/utils/task_utils.py` | 内存态任务追踪（`pending/processing/completed/failed`），含节点名 → 中文名映射，供前端展示                  |
 | `app/utils/sse_utils.py`  | 每个 `session_id` 一个队列，`push_to_session()` 推送 `ready/progress/delta/final/error` 事件  |
 | `app/core/rate_limit.py`  | 滑动窗口限速（默认 60 秒 9 次），用于 VLM/LLM 调用保护                                                |
@@ -576,6 +583,8 @@ curl -X DELETE "http://127.0.0.1:8001/history/demo-001"
 5. **客户端收敛**：所有外部连接通过 `app/clients/manager/` 的单例管理器创建，并在 `lifespan` 中按"必需 / 可选"分级初始化。
 6. **本地自测**：每个节点文件底部保留 `if __name__ == "__main__":` 自测入口，便于单独跑通。
 7. **前端规范**：React 组件按 `components/{layout,chat,importer,ui}` 分层；API 调用统一收敛到 `lib/kbApi.ts`，禁止在组件里直接 `fetch` 裸写地址；新增接口请在 `lib/types` 同步类型。
+8. **异常规范**：业务失败一律抛 `app/core/exceptions.py` 中的领域异常（如 `PdfConversionError` / `MilvusError` / `StateFieldError`），并携带 `node_name`，便于定位与按类型分支处理。**例外**：`app/api/schemas/*` 的 Pydantic 校验器必须继续抛 `ValueError` —— 只有 `ValueError` / `AssertionError` 会被 FastAPI 转成 422，换成自定义异常会把 422 变成 500。
+9. **日志规范**：运行时路径统一 `from app.core.logger import logger`，**禁止 `print`**（仅文件底部 `__main__` 自测块允许），也不要 `import logging` 或调用 `logging.basicConfig`，避免与 Loguru 的全局配置冲突。
 
 新增一个查询节点的典型步骤：
 

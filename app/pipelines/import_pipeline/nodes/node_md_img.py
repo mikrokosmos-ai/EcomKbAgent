@@ -273,7 +273,7 @@ def node_md_img(state: ImportGraphState) -> ImportGraphState:
      # 4. 调用模型识别图片的描述文本
     # {图片名 : 描述 } ....
     summaries = step_3_image_summary(targets, md_path_obj.stem)
-    print(summaries)
+    logger.info(f"图片摘要生成完成,共{len(summaries)}条:{summaries}")
     # 5. 上传图片,并且替换md_content内容
     new_md_content =  step_4_upload_and_replace(summaries, targets,md_content, md_path_obj.stem)
     # 6. new_md_content新的备份

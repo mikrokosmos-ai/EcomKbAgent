@@ -85,7 +85,7 @@ def node_web_search_mcp(state):
     # mcp_result = {content:[{text:"{pages:[{x,x,x}]}"}]}
     text_dict = json.loads(mcp_result.content[0].text)
     pages = text_dict.get('pages', [])
-    print(f"pages:{pages}")
+    logger.info(f"联网搜索命中{len(pages)}条结果，明细：{pages}")
     # 记录任务结束
     add_done_task(state["session_id"], sys._getframe().f_code.co_name, state["is_stream"])
     return {"web_search_docs": pages}

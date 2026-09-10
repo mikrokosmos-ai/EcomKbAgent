@@ -38,7 +38,7 @@ _URL_TAIL_PUNCT_RE = re.compile(r'[)\]}\'">，。,;；】）＞]+$')
 
 def _sanitize_evidence_text(text: str) -> str:
     """
-    C3 消毒：对进入 Prompt 的外部资料做无害化处理。
+    消毒：对进入 Prompt 的外部资料做无害化处理。
     1. 剥离零宽 / 双向控制字符（隐藏指令的常用载体）。
     2. 尖括号替换为全角，防止资料中出现 </本地知识库证据> 之类的闭合标签逃逸。
     """
@@ -50,7 +50,7 @@ def _sanitize_evidence_text(text: str) -> str:
 
 def _split_docs_by_type(reranked_docs):
     """
-    C1 分流：按 type 字段把重排结果拆成本地证据与联网证据。
+    分流：按 type 字段把重排结果拆成本地证据与联网证据。
     约定：type == "milvus" 为本地知识库；其余（web / 缺失 / 未知）一律归入
     最低信任的联网区 —— 默认值 fail-safe，宁可少信不可多信。
     """
@@ -95,8 +95,6 @@ def _build_evidence(docs, index_prefix: str, budget: int) -> str:
 def _build_history(history, budget: int) -> str:
     """
     历史对话独立预算，避免与证据区互相挤占。
-    修复：原实现在循环内执行 `used += len(history_str)`，而 history_str 是累加串，
-    导致 used 被重复计数，历史被过早截断甚至整段丢弃。
     历史内容同样做消毒，防止多轮注入。
     """
     lines = []
@@ -115,6 +113,7 @@ def _build_history(history, budget: int) -> str:
         lines.append(line)
         used += len(line)
     return "".join(lines) if lines else "无历史对话"
+
 
 @step_log("step_1_check_answer")
 def step_1_check_answer(state) -> bool:
@@ -136,12 +135,14 @@ def step_1_check_answer(state) -> bool:
         return False
 
 
-# 目标结构
-# HAK 180 烫金机的操作面板位于机器正前方。开启电源后，您需要先设置温度，默认建议设置在 110℃ 左右。
-# 具体的按键位置请参考下图：
-# 【图片】
-# http://local-server/images/panel_view.jpg
-# http://local-server/images/button_detail.jpg
+"""
+目标结构
+HAK 180 烫金机的操作面板位于机器正前方。开启电源后，您需要先设置温度，默认建议设置在 110℃ 左右。
+具体的按键位置请参考下图：
+【图片】
+http://local-server/images/panel_view.jpg
+http://local-server/images/button_detail.jpg
+"""
 @step_log("step_2_construct_prompt")
 def step_2_construct_prompt(state: QueryGraphState) -> str:
     """
@@ -158,29 +159,21 @@ def step_2_construct_prompt(state: QueryGraphState) -> str:
     reranked_docs = state.get("reranked_docs") or []
 
     # 2 按来源分流：本地知识库（高信任）与联网结果（低信任）分别成区
-    # ---------------------------------------------------------
     # 逻辑解释：
     # 1. reranked_docs 每条带 type 字段：milvus=本地知识库，web=联网结果。
-    #    注意：本节点原实现读取的 source / chunk_id 字段在重排后并不存在（恒为空），
-    #    真正的来源标识是 type，这里改用 type 分流。
-    # 2. 两段证据各自独立预算（LOCAL_EVIDENCE_BUDGET / WEB_EVIDENCE_BUDGET），
-    #    避免联网 snippet 与本地手册互相挤占。
+    # 2. 两段证据各自独立预算（LOCAL_EVIDENCE_BUDGET / WEB_EVIDENCE_BUDGET），避免联网 snippet 与本地手册互相挤占。
     # 3. 未知 / 缺失 type 一律归入联网区（最低信任），默认 fail-safe。
-    # ---------------------------------------------------------
     local_docs, web_docs = _split_docs_by_type(reranked_docs)
-
     local_evidence = _build_evidence(local_docs, "", LOCAL_EVIDENCE_BUDGET) \
         or "（本次未检索到本地知识库内容，请如实说明未找到，不要推测。）"
     web_evidence = _build_evidence(web_docs, "W", WEB_EVIDENCE_BUDGET) \
         or "（本次无联网补充资料。）"
 
     # 3. 格式化 History (历史对话)
-    # ---------------------------------------------------------
     # 逻辑解释：
     # 1. 遍历历史对话记录 (history)，格式化为 "用户: ... \n 助手: ..." 的文本块。
     # 2. 历史区改用独立预算 HISTORY_BUDGET，不再与证据区共用计数器。
     # 3. 历史内容同样做消毒，防止多轮注入。
-    # ---------------------------------------------------------
     history_str = _build_history(history, HISTORY_BUDGET)
 
     # 4. 格式化 Item Names (提问商品)
@@ -196,8 +189,8 @@ def step_2_construct_prompt(state: QueryGraphState) -> str:
                          )
 
     logger.info(f"组装后的提示词为：{prompt}")
-
     return prompt
+
 
 @step_log("step_3_generate_response")
 def step_3_generate_response(state: QueryGraphState, prompt: str) -> QueryGraphState:
@@ -275,9 +268,7 @@ def _extract_images_from_docs(docs):
 
     # 注意：图片 alt 文本常含换行（图片摘要由 LLM 生成，是多行内容），
     # 必须启用 DOTALL，否则 alt 跨行的图片会被整段漏掉。
-    # 实测：本地知识库 24 张图片中，不启用时会漏掉 5 张。
     md_img_pattern = re.compile(r'!\[.*?\]\((.*?)\)', re.DOTALL)
-
     logger.info(f"开始提取图片，待处理文档数: {len(docs)}")
 
     for i, doc in enumerate(docs):
@@ -349,9 +340,10 @@ def _extract_images_from_answer(answer: str) -> list:
                 images.append(url)
     return images
 
+
 def _is_trusted_image_url(url: str) -> bool:
     """
-    C4 图片域名白名单校验：必须是本库 MinIO（endpoint + bucket）下的地址。
+    图片域名白名单校验：必须是本库 MinIO（endpoint + bucket）下的地址。
     配置缺失时 _IMAGE_HOST 为空，本函数恒返回 False（fail-closed）。
     """
     if not url:
@@ -370,7 +362,7 @@ def _is_trusted_image_url(url: str) -> bool:
 
 def _strip_untrusted_links(answer: str) -> str:
     """
-    C5 输出侧清洗，针对"答案正文里的普通外链"这一 prompt 够不到的缺口：
+    输出侧清洗，针对"答案正文里的普通外链"这一 prompt 够不到的缺口：
     1. 正文（【图片】区块之前）：非白名单 URL 替换为「【已移除外部链接】」；
        白名单（本库 MinIO）URL 原样保留。
     2. 【图片】区块内：整行剔除含非白名单 URL 的行，避免前端渲染外链图片。
@@ -459,9 +451,7 @@ def node_answer_output(state: QueryGraphState) -> QueryGraphState:
         step_3_generate_response(state, prompt)
 
     # 提取图片URL（用于历史记录和前端展示）
-    # 以 LLM 答案中显式书写的【图片】区块为准；无区块则返回空列表，
-    # 避免"每问必出图 / 图片与答案无关"的问题。
-    # C5：先对答案做输出侧清洗（正文非白名单外链替换、【图片】区非白名单 URL 整行剔除）
+    # 先对答案做输出侧清洗（正文非白名单外链替换、【图片】区非白名单 URL 整行剔除）
     raw_answer = (state.get("answer") or "").strip()
     safe_answer = _strip_untrusted_links(raw_answer)
     if safe_answer != raw_answer:
@@ -473,8 +463,7 @@ def node_answer_output(state: QueryGraphState) -> QueryGraphState:
             set_task_result(state["session_id"], "answer", safe_answer)
     answer_text = safe_answer
 
-    # C4：候选图片只取本地知识库证据（type=milvus），并叠加域名白名单。
-    # 修复：原实现把 web 结果也纳入候选，导致外部图片 URL 能通过交集校验。
+    # 候选图片只取本地知识库证据（type=milvus），并叠加域名白名单。
     local_docs, _ = _split_docs_by_type(state.get("reranked_docs") or [])
     candidate_images = [u for u in _extract_images_from_docs(local_docs)
                         if _is_trusted_image_url(u)]
@@ -511,6 +500,7 @@ def node_answer_output(state: QueryGraphState) -> QueryGraphState:
             }
         )
     return state
+
 
 
 if __name__ == "__main__":

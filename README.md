@@ -318,12 +318,12 @@ cp .env.example .env        # 直接由样例文件生成，再按实际环境�
 
 | 分类        | 变量                                          | 示例                                                         | 说明                                                  |
 | --------- | ------------------------------------------- | ---------------------------------------------------------- | --------------------------------------------------- |
-| 日志        | `LOG_CONSOLE_ENABLE` / `LOG_CONSOLE_LEVEL`  | `True` / `DEBUG`                                           | 控制台日志开关与级别                                          |
+| 日志        | `LOG_CONSOLE_ENABLE` / `LOG_CONSOLE_LEVEL`  | `True` / `INFO`                                            | 控制台日志开关与级别                                          |
 |           | `LOG_FILE_ENABLE` / `LOG_FILE_LEVEL`        | `True` / `INFO`                                            | 文件日志（输出到 `logs/`）                                   |
 |           | `LOG_FILE_RETENTION`                        | `7 days`                                                   | 日志保留时长                                              |
 | 文档解析      | `MINERU_API_TOKEN`                          | `sk-...`                                                   | MinerU 平台 API Token                                 |
 |           | `MINERU_BASE_URL`                           | `https://mineru.net/api/v4`                                | MinerU 服务地址                                         |
-|           | `MODELSCOPE_OFFLINE` / `MODELSCOPE_CACHE`   | `1` / `D:/pycharm/model`                                   | ModelScope 离线模式与缓存目录                                |
+|           | `MODELSCOPE_OFFLINE` / `MODELSCOPE_CACHE`   | `1` / `D:/models/cache`                                   | ModelScope 离线模式与缓存目录                                |
 | LLM / VLM | `OPENAI_API_KEY`                            | `sk-...`                                                   | OpenAI 兼容接口密钥（同时用于 MCP 鉴权）                          |
 |           | `OPENAI_BASE_URL`                           | `https://dashscope.aliyuncs.com/compatible-mode/v1`        | OpenAI 兼容接口地址                                       |
 |           | `LLM_DEFAULT_MODEL`                         | `qwen3.7-flash`                                            | 文本生成模型                                              |

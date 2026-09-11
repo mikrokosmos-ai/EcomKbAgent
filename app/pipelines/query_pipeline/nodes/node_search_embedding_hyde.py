@@ -12,9 +12,20 @@ from app.repositories.vector_search_repo import create_hybrid_search_requests, h
 from app.conf.milvus_config import milvus_config
 from app.core.logger import logger, node_log, step_log
 from app.prompts.loader import load_prompt
+from app.conf.query_pipeline_config import query_pipeline_config
 from dotenv import load_dotenv, find_dotenv
 
 load_dotenv(find_dotenv())
+
+# 切片混合检索参数（来源：app/conf/query_pipeline_config.py，默认值等于改造前的字面量现值）
+# 说明：与 node_search_embedding 共用同一组配置，保证两路召回参数一致
+# 稠密/稀疏向量权重
+CHUNK_SEARCH_WEIGHTS = (
+    query_pipeline_config.chunk_search_dense_weight,
+    query_pipeline_config.chunk_search_sparse_weight,
+)
+# 单路检索返回条数
+CHUNK_SEARCH_LIMIT = query_pipeline_config.chunk_search_limit
 
 
 @step_log("step_1_data_validates")
@@ -86,9 +97,9 @@ def step_4_mivlus_hybrid_search(dense_vector, sparse_vector, item_names):
         client=mivlus_client,
         collection_name=milvus_config.chunks_collection,
         reqs=reqs,
-        ranker_weights=(0.8, 0.2),
+        ranker_weights=CHUNK_SEARCH_WEIGHTS,  # 稠密/稀疏权重（配置项，默认 0.8 / 0.2）
         norm_score=True,
-        limit=5,
+        limit=CHUNK_SEARCH_LIMIT,
         output_fields=["chunk_id", "item_name", "content", "title", "parent_title", "part", "file_title"]
     )
     return resp[0] if resp and len(resp) > 0 else []

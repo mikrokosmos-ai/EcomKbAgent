@@ -3,20 +3,24 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List, Dict
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from app.conf.import_pipeline_config import import_pipeline_config
 from app.core.logger import logger, node_log, step_log
 from app.pipelines.import_pipeline.state import ImportGraphState
 from app.utils.task_utils import add_running_task, add_done_task
 
-# ====================== 全局配置（可根据模型调整）======================
-CHUNK_MAX_SIZE = 500  # 500字符串 触发二次切割!
+# ====================== 全局配置（来源：app/conf/import_pipeline_config.py）======================
+# 说明：以下常量仅作为配置项的模块级别名，变量名与用法保持不变；
+#       默认值等于改造前的字面量现值，可用同名环境变量覆盖，详见配置文件。
+# 500字符串 触发二次切割!
+CHUNK_MAX_SIZE = import_pipeline_config.chunk_max_size
 # 单个文本块最大长度（控制不超过模型上下文）
-CHUNK_SIZE = 200   # 小值方便测试切割
+CHUNK_SIZE = import_pipeline_config.chunk_size
 # 块之间重叠长度（保证语义不丢失）
-CHUNK_OVERLAP = 20
+CHUNK_OVERLAP = import_pipeline_config.chunk_overlap
 # 最小文本块长度（低于此值的相邻块将被合并,避免切分过碎）
-CHUNK_MIN_SIZE = 100
+CHUNK_MIN_SIZE = import_pipeline_config.chunk_min_size
 
 @step_log("step_1_validate_clean")
 def step_1_validate_clean(state) -> Tuple[str, str]:

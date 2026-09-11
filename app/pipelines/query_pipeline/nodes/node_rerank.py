@@ -2,21 +2,24 @@ import sys
 from dotenv import load_dotenv
 from app.clients.reranker_client import get_reranker_model
 from app.utils.task_utils import add_running_task, add_done_task
-from app.core.logger import logger, step_log, node_log
+from app.core.logger import logger, step_log, node_log, node_guard
+from app.conf.query_pipeline_config import query_pipeline_config
 
 load_dotenv()
 
 # -----------------------------
-# Rerank / TopK 全局常量（不从 state 读取）
+# Rerank / TopK 全局常量
+# 契约：本组参数一律**从配置读取，不从 state 读取**——state 只流转数据，不承载调优参数。
+#       来源：app/conf/query_pipeline_config.py，默认值等于改造前的字面量现值。
 # -----------------------------
-# 动态 TopK 硬上限：最多取前 N 条（<=10）
-RERANK_MAX_TOPK: int = 10
+# 动态 TopK 硬上限：最多取前 N 条
+RERANK_MAX_TOPK: int = query_pipeline_config.rerank_max_topk
 # 最小 TopK：至少保留前 N 条（>=1，且 <= RERANK_MAX_TOPK）
-RERANK_MIN_TOPK: int = 1
+RERANK_MIN_TOPK: int = query_pipeline_config.rerank_min_topk
 # 断崖阈值（相对）
-RERANK_GAP_RATIO: float = 0.25
+RERANK_GAP_RATIO: float = query_pipeline_config.rerank_gap_ratio
 # 断崖阈值（绝对）
-RERANK_GAP_ABS: float = 0.5
+RERANK_GAP_ABS: float = query_pipeline_config.rerank_gap_abs
 
 
 @step_log("step_1_data_validates")
@@ -154,6 +157,10 @@ def step_4_chunk_topk(chunk_list_score_sorted):
     return final_chunk_list
 
 
+# 装饰器定序约定：@node_guard 写在 @node_log 之上
+# （Python 自下而上应用 → node_log 先包裹并记录原始堆栈，node_guard 再包裹做异常归一化）
+# 本节点为 node_guard 的试点接入点，验证通过后将按同样方式逐步推广到其余节点。
+@node_guard("node_rerank")
 @node_log("node_rerank")
 def node_rerank(state):
     """

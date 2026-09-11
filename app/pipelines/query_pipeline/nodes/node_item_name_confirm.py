@@ -13,8 +13,24 @@ from app.clients.milvus_client import get_milvus_client
 from app.repositories.vector_search_repo import create_hybrid_search_requests, hybrid_search
 from dotenv import load_dotenv, find_dotenv
 from app.core.logger import logger, node_log, step_log
+from app.conf.query_pipeline_config import query_pipeline_config
 
 load_dotenv(find_dotenv())
+
+# ====================== 商品名确认参数（来源：app/conf/query_pipeline_config.py）======================
+# 说明：以下常量仅作为配置项的模块级别名，默认值等于改造前的字面量现值；
+#       可用同名环境变量覆盖，详见配置文件。
+# 高置信阈值：达到即确认为该商品名
+ITEM_NAME_HIGH_THRESHOLD = query_pipeline_config.item_name_high_threshold
+# 中置信阈值：介于中/高阈值之间时，转入"待用户确认"分支
+ITEM_NAME_MID_THRESHOLD = query_pipeline_config.item_name_mid_threshold
+# 待确认时最多给出的候选数量
+ITEM_NAME_MAX_OPTIONS = query_pipeline_config.item_name_max_options
+# 商品名向量匹配的稠密/稀疏权重
+ITEM_NAME_MATCH_WEIGHTS = (
+    query_pipeline_config.item_name_match_dense_weight,
+    query_pipeline_config.item_name_match_sparse_weight,
+)
 
 
 @step_log("step_1_data_validates")
@@ -105,7 +121,7 @@ def step_4_vector_query_item_name(item_names):
             client=milvus_client,
             collection_name=milvus_config.item_name_collection,
             reqs=reqs,
-            ranker_weights=(0.5,0.5),   # 稠密向量权重0.5，稀疏向量权重0.5
+            ranker_weights=ITEM_NAME_MATCH_WEIGHTS,  # 稠密/稀疏权重（配置项，默认 0.5 / 0.5）
             norm_score = True,      # 将分调整到 0 - 1 之间比较
             output_fields=["item_name"]
         )
@@ -145,12 +161,12 @@ def step_5_select_item_name_list(query_milvus_results):
     原则2: 当没有确认的item_name我们提取可以选的item_name 可选的每个提供至多两个2
     原则3: 他们最终不会区分,都会一起加入到 confirmed_item_name_list | options_item_name_list
         确认的规则:
-             大于 0.65 入选 (自己调整)
+             大于等于 ITEM_NAME_HIGH_THRESHOLD 入选 (配置项，默认 0.65，可按语料调整)
              只有一个 -> 就选他
              有多个  -> 选item_name (lm)  -> 最高分
         可选的规则: (没有确定)
-             大于0.55  <=    <小于0.65
-             提供top2
+             ITEM_NAME_MID_THRESHOLD <= 分数 < ITEM_NAME_HIGH_THRESHOLD
+             提供 top ITEM_NAME_MAX_OPTIONS 个（配置项，默认 2）
         分更低: 就是无用的数据 不需要处理...
 
     :param vector_dict:
@@ -164,8 +180,9 @@ def step_5_select_item_name_list(query_milvus_results):
         # 3. 排序. ..
         item_name_list.sort(key=lambda x: x["score"], reverse=True)
         # 4. 截取确认的集合和可选的集合
-        high_list = [item for item in item_name_list if item["score"] >= 0.65]
-        low_list = [item for item in item_name_list if 0.50 <= item["score"] < 0.65]
+        high_list = [item for item in item_name_list if item["score"] >= ITEM_NAME_HIGH_THRESHOLD]
+        low_list = [item for item in item_name_list
+                    if ITEM_NAME_MID_THRESHOLD <= item["score"] < ITEM_NAME_HIGH_THRESHOLD]
         # 5. 确认集合长度和选择 确定一个
         # 只获取分数最高的
         if len(high_list) > 0:
@@ -173,7 +190,9 @@ def step_5_select_item_name_list(query_milvus_results):
             continue
         # 6. 可选集合在确认集合没有选中的场景下,进行可选集合处理
         if len(low_list) > 0:
-            options_item_name_list.extend([item['item_name'] for item in low_list[:2]])
+            options_item_name_list.extend(
+                [item['item_name'] for item in low_list[:ITEM_NAME_MAX_OPTIONS]]
+            )
     # 7. 返回结果
     return {
         "confirmed_item_name_list": confirmed_item_name_list,
@@ -209,6 +228,8 @@ def step_6_deal_state(state, final_result, rewritten_query, history_chats):
         return  state
     # 3. 可选都没有,无法确定无法可选,给与提示,明确即可
     state["answer"] = "抱歉，未找到相关产品，请提供准确型号以便我为您查询。"
+    # 统一返回契约：三条分支都返回 state，避免出现"部分分支返回、部分分支隐式返回 None"的不一致
+    return state
 
 
 @step_log("step_7_save_user_chat_message")
@@ -245,6 +266,12 @@ def node_item_name_confirm(state):
         query_milvus_results = step_4_vector_query_item_name(item_names)
         #  6. 确认item_name列表
         final_result = step_5_select_item_name_list(query_milvus_results)
+    else:
+        # 兜底分支：LLM 未提取到任何商品名（属于正常业务场景，例如用户只问"这个怎么用？"且无历史上下文）。
+        # 必须显式给出"空结果"，否则下面的 step_6 会因 final_result 未定义而抛 NameError，
+        # 把本应走"未找到相关产品"提示的正常提问变成 500。
+        logger.warning("LLM 未提取到任何商品名，跳过向量匹配，直接进入兜底提示分支")
+        final_result = {"confirmed_item_name_list": [], "options_item_name_list": []}
     # 7.判断确定和可选的列表,最终处理answer以及给state
     step_6_deal_state(state, final_result, rewritten_query, history_chats)
     # 8.保存本次对话的记录(user)

@@ -1,8 +1,12 @@
 import sys
+from app.conf.import_pipeline_config import import_pipeline_config
 from app.pipelines.import_pipeline.state import ImportGraphState
 from app.clients.embedding_client import generate_embeddings
 from app.utils.task_utils import add_running_task, add_done_task
 from app.core.logger import logger, node_log, step_log
+
+# 切片向量化的批大小（来源：app/conf/import_pipeline_config.py，默认值等于改造前的字面量 5）
+EMBEDDING_BATCH_SIZE = import_pipeline_config.embedding_batch_size
 
 @step_log("step_1_validate_chunks")
 def step_1_validate_chunks(state):
@@ -30,10 +34,10 @@ def step_2_embedding_chunks(chunks):
     :param chunks:
     :return:
     """
-    # 1. 数据准备工作(定义接收最终chunk列表,当前chunks total,声明一个步长变量 5)
+    # 1. 数据准备工作(定义接收最终chunk列表,当前chunks total,声明一个批大小变量)
     chunks_vector = []
     total = len(chunks)
-    step = 5
+    step = EMBEDDING_BATCH_SIZE
     # 2. 批量处理chunks -> 5
     for index in range(0, total, step):
         try:

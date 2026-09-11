@@ -13,23 +13,27 @@ from app.pipelines.import_pipeline.state import ImportGraphState
 from app.clients.milvus_client import get_milvus_client
 # 3. 大模型工具：获取大模型客户端，统一模型调用入口
 from app.clients.llm_client import get_llm_client
-# 4. 向量工具：BGE-M3模型实例、向量生成方法（稠密+稀疏向量）
-from app.clients.embedding_client import get_bge_m3_ef, generate_embeddings
+# 4. 向量工具：向量生成方法（稠密+稀疏向量）
+from app.clients.embedding_client import generate_embeddings
 # 5. 任务工具：更新任务运行状态，用于任务监控和管理
 from app.utils.task_utils import add_running_task, add_done_task
 # 6. 日志工具：项目统一日志入口，分级输出（info/warning/error）
 from app.core.logger import logger, node_log, step_log
 # 7. 提示词工具：加载本地prompt模板，实现提示词与代码解耦
 from app.prompts.loader import load_prompt
+# 8. 导入链路配置：业务可调参数统一入口（默认值等于改造前的字面量现值）
+from app.conf.import_pipeline_config import import_pipeline_config
 
 
-# --- 配置参数 (Configuration) ---
-# 大模型识别商品名称的上下文切片数：取前5个切片，避免上下文过长导致大模型输入超限
-DEFAULT_ITEM_NAME_CHUNK_K = 5
-# 单个切片内容截断长度：防止单切片内容过长，占满大模型上下文
+# --- 配置参数 (Configuration，来源：app/conf/import_pipeline_config.py) ---
+# 大模型识别商品名称的上下文切片数：截取前N个切片，避免上下文过长导致大模型输入超限
+DEFAULT_ITEM_NAME_CHUNK_K = import_pipeline_config.item_name_chunk_k
+# 注意：本常量为历史遗留项，当前代码并未使用（step_2_build_context 只对拼接结果做
+#       总长度截断，未逐条截断单切片）。此处保留声明以存留原始设计意图，
+#       如需删除请先确认是否要补做"单切片截断"逻辑——补做属于行为变更，不应顺手改。
 SINGLE_CHUNK_CONTENT_MAX_LEN = 800
-# 大模型上下文总字符数上限：适配主流大模型输入限制，默认2500
-CONTEXT_TOTAL_MAX_CHARS = 2500
+# 大模型上下文总字符数上限：适配主流大模型输入限制
+CONTEXT_TOTAL_MAX_CHARS = import_pipeline_config.item_name_context_max_chars
 
 @step_log("step_1_check_content")
 def step_1_check_content(state):

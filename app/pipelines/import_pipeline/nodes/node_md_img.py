@@ -22,6 +22,8 @@ from langchain.messages import HumanMessage
 # 项目配置
 from app.conf.minio_config import minio_config
 from app.conf.lm_config import lm_config
+# 导入链路配置：图片摘要限流参数（默认值等于改造前 apply_api_rate_limit 的默认值 9 次 / 60 秒）
+from app.conf.import_pipeline_config import import_pipeline_config
 # 项目日志工具（统一使用）
 from app.core.logger import logger, node_log, step_log
 # api访问限速工具
@@ -134,8 +136,11 @@ def step_3_image_summary(targets, stem) -> Dict[str, str]:
     # 3. 循环总结每份图片
     for image_name, image_path, context in targets:
         # 4. 构建提示词
-        # 访问限制
-        apply_api_rate_limit()
+        # 访问限制（参数来源：app/conf/import_pipeline_config.py）
+        apply_api_rate_limit(
+            max_requests=import_pipeline_config.image_summary_rate_max_requests,
+            window_seconds=import_pipeline_config.image_summary_rate_window_seconds,
+        )
         prompt = load_prompt("image_summary", root_folder=stem,image_content=context)
         # base64.b64encode(字节) 普通字节转成base64的字节 .decode(encoding="utf-8") 转成字符串
         image_path_obj = Path(image_path)

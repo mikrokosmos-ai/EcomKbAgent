@@ -6,14 +6,18 @@ from app.core.logger import logger, node_log, step_log
 from app.prompts.loader import load_prompt
 from app.clients.llm_client import get_llm_client
 from app.repositories.history_repo import save_chat_message
+from app.conf.query_pipeline_config import query_pipeline_config
 import re
 from urllib.parse import urlparse
 
 _IMAGE_BLOCK_MARKER = "【图片】"
-MAX_CONTEXT_CHARS = 12000
+# ====================== 上下文预算（来源：app/conf/query_pipeline_config.py）======================
+# 说明：三区预算互不挤占；HISTORY_BUDGET 由"总预算 - 本地 - 联网"推导而非独立配置，
+#       这样可从构造上保证"三段之和不超总预算"这一不变式。
+MAX_CONTEXT_CHARS = query_pipeline_config.max_context_chars
 # 证据区分块预算：本地 + 联网 + 历史 = MAX_CONTEXT_CHARS，三段互不挤占
-LOCAL_EVIDENCE_BUDGET = 8000
-WEB_EVIDENCE_BUDGET = 2500
+LOCAL_EVIDENCE_BUDGET = query_pipeline_config.local_evidence_budget
+WEB_EVIDENCE_BUDGET = query_pipeline_config.web_evidence_budget
 HISTORY_BUDGET = MAX_CONTEXT_CHARS - LOCAL_EVIDENCE_BUDGET - WEB_EVIDENCE_BUDGET
 
 # -----------------------------

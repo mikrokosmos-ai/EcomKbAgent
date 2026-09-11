@@ -1,8 +1,13 @@
 import sys
-from typing import List, Dict, Any
-from app.conf.embedding_config import embedding_config
+from app.conf.query_pipeline_config import query_pipeline_config
 from app.utils.task_utils import add_running_task, add_done_task
 from app.core.logger import logger, node_log, step_log
+
+# RRF 融合参数（来源：app/conf/query_pipeline_config.py，默认值等于改造前的默认参数值）
+# k：平滑参数，用于削弱排名的过大影响
+RRF_K = query_pipeline_config.rrf_k
+# top：融合排序后保留的条数
+RRF_TOP = query_pipeline_config.rrf_top
 
 
 @step_log("step_1_data_validates")
@@ -18,13 +23,13 @@ def step_1_data_validates(state):
 
 
 @step_log("step_2_rrf_list")
-def step_2_rrf_list(param_list, k: int = 60, top: int = 5):
+def step_2_rrf_list(param_list, k: int = RRF_K, top: int = RRF_TOP):
     """
     进行多路融合排序 , 同源,启动算法!
     本次算法 = (1.0 / (k + rank)) * weight
     :param param_list: [([1 {id:xx,distance:xx,entity:{chunk_id}},2,3],1.0),([1,2,3],1.0),([],1.0)]
-    :param k 平滑参数,用于削弱排名的过大影响
-    :param top 最终的获取数量
+    :param k 平滑参数,用于削弱排名的过大影响（默认取配置 RRF_K）
+    :param top 最终的获取数量（默认取配置 RRF_TOP）
     :return: [entity,entity....]
     """
     # 1. 定义两个字典( 分别存储chunk_id，累计得分  || chunk_id  chunk entity )

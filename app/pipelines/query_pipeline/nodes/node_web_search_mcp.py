@@ -5,10 +5,15 @@ from agents.mcp import MCPServerStreamableHttp
 from app.conf.bailian_mcp_config import mcp_config
 from app.utils.task_utils import add_running_task, add_done_task
 from app.core.logger import logger, node_log, step_log
+from app.conf.query_pipeline_config import query_pipeline_config
 
 
 DASHSCOPE_BASE_URL_STREAMBLE = mcp_config.mcp_base_url
 DASHSCOPE_API_KEY = mcp_config.api_key
+
+# 联网搜索返回条数（来源：app/conf/query_pipeline_config.py，默认值等于改造前调用点的字面量 10）
+# 说明：函数默认值与调用点统一使用本常量，避免同一个可调参数出现两处取值来源。
+WEB_SEARCH_COUNT = query_pipeline_config.web_search_count
 
 
 @step_log("step_1_data_validate")
@@ -21,7 +26,7 @@ def step_1_data_validate(state):
 
 
 @step_log("node_web_search_mcp_async")
-async def node_web_search_mcp_async(rewritten_query: str, count: int = 5):
+async def node_web_search_mcp_async(rewritten_query: str, count: int = WEB_SEARCH_COUNT):
     """
     使用openai的方式调用mcpserver提供的工具
     :param rewritten_query:
@@ -71,7 +76,7 @@ def node_web_search_mcp(state):
     # 2. 获取数据和校验
     rewritten_query = step_1_data_validate(state)
     # 3. mcp的调用流程封装成一个异步函数
-    mcp_result = asyncio.run(node_web_search_mcp_async(rewritten_query, count=10))
+    mcp_result = asyncio.run(node_web_search_mcp_async(rewritten_query, count=WEB_SEARCH_COUNT))
     # 4. 结果解析
     # {
     #     "type": "tool_call",

@@ -1,6 +1,5 @@
 from typing import TypedDict
 import copy
-from app.core.logger import logger
 
 
 class ImportGraphState(TypedDict):
@@ -14,6 +13,10 @@ class ImportGraphState(TypedDict):
     # --- 流程控制标记 ---
     is_md_read_enabled: bool  # 是否启用 Markdown 读取路径
     is_pdf_read_enabled: bool  # 是否启用 PDF 读取路径
+    # 是否流式输出标记。导入链路当前恒为 False（导入不走向 SSE 推送），
+    # 但各导入节点均会把它透传给 add_running_task / add_done_task，
+    # 因此在此显式声明为状态契约的一部分，与 QueryGraphState 保持一致。
+    is_stream: bool
 
     # --- 路径相关 ---
     local_dir: str  # 当前工作目录或输出目录
@@ -37,6 +40,7 @@ graph_default_state: ImportGraphState = {
     "task_id": "",
     "is_pdf_read_enabled": False,
     "is_md_read_enabled": False,
+    "is_stream": False,
     "local_dir": "",
     "local_file_path": "",
     "pdf_path": "",

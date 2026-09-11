@@ -1,11 +1,11 @@
 # 加载环境变量：从 .env 文件读取配置（如Milvus地址、KG服务地址、BGE模型路径等）
 from dotenv import load_dotenv
-# 导入LangGraph核心依赖：StateGraph(状态图)、START/END(内置起始/结束节点常量)
-from langgraph.graph import StateGraph, END, START
+# 导入LangGraph核心依赖：StateGraph(状态图)、END(内置结束节点常量)
+from langgraph.graph import StateGraph, END
 
 from app.core.logger import logger
 # 导入自定义状态类：统一管理工作流全程的所有数据（各节点共享/修改）
-from app.pipelines.import_pipeline.state import ImportGraphState, create_default_state
+from app.pipelines.import_pipeline.state import ImportGraphState
 # 导入所有自定义业务节点：每个节点对应知识库导入的一个具体步骤
 from app.pipelines.import_pipeline.nodes.node_entry import node_entry  # 入口节点：初始化参数、校验输入
 from app.pipelines.import_pipeline.nodes.node_pdf_to_md import node_pdf_to_md  # PDF转MD：解析PDF文件为markdown格式
@@ -31,7 +31,6 @@ workflow.add_node("node_bge_embedding", node_bge_embedding)
 workflow.add_node("node_import_milvus", node_import_milvus)
 
 # 3. 指定入口节点
-# workflow.add_edge(START,"node_entry")
 workflow.set_entry_point("node_entry")
 
 
@@ -96,14 +95,16 @@ if __name__ == "__main__":
         logger.error(f"全流程测试失败：测试PDF文件不存在，路径：{test_pdf_path}")
         logger.info("请检查文件路径，或手动将测试文件放入项目根目录的doc文件夹中")
     else:
-        # 4. 构造测试状态（贴合实际业务入参，开启PDF解析开关）
+        # 4. 构造测试状态（贴合实际业务入参）
+        # 注意：两个开关此处置 False 并非"关闭解析"——文件类型判定由 node_entry 按后缀完成，
+        #       它会依据 .pdf 后缀把 is_pdf_read_enabled 置为 True 后走 PDF 分支。
         test_state = ImportGraphState({
             "task_id": "test_kg_import_workflow_001",  # 测试任务ID
-            "user_id": "test_user",  # 测试用户ID
             "local_file_path": test_pdf_path,  # 测试PDF文件路径
             "local_dir": test_output_dir,  # 中间文件输出目录
-            "is_pdf_read_enabled": False,  # 开启PDF解析（核心开关）
-            "is_md_read_enabled": False  # 关闭MD解析
+            "is_pdf_read_enabled": False,  # 由 node_entry 按后缀判定后置位
+            "is_md_read_enabled": False,  # 由 node_entry 按后缀判定后置位
+            "is_stream": False  # 导入链路不走流式推送（状态契约字段）
         })
         try:
             logger.info(f"测试任务启动，PDF文件路径：{test_pdf_path}")

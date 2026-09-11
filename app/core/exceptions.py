@@ -54,6 +54,7 @@ __all__ = [
     "MilvusError",
     "MinioError",
     "MongoError",
+    "Neo4jError",
     # 通用校验
     "InputValidationError",
 ]
@@ -270,6 +271,17 @@ class MinioError(StorageError):
 
 class MongoError(StorageError):
     """MongoDB 存储错误：会话历史读写失败"""
+    pass
+
+
+class Neo4jError(StorageError):
+    """
+    图数据库存储错误：Neo4j 连接、Cypher 执行或图数据读写失败
+
+    说明：当前版本尚未接入知识图谱链路，本异常类为**预留项**，
+    供后续「知识图谱导入 / 查询」节点直接使用，以保持存储支的完整性
+    （Milvus / MinIO / Mongo / Neo4j 四类存储各有一个对应异常）。
+    """
     pass
 
 

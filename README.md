@@ -142,7 +142,7 @@ EcomKbAgent 针对这三点设计：**用 MinerU 做高质量 PDF→Markdown 解
 
 ```
 EcomKbAgent/
-├── main.py                       # 统一服务入口：--service {all|import|query}
+├── main.py                       # 统一服务入口：--service {all|import|query|both}
 ├── pyproject.toml                # 后端项目元数据与依赖声明（uv 管理）
 ├── uv.lock                       # 后端依赖锁定文件
 ├── docker-compose.yaml           # 基础设施编排（Milvus / etcd / MinIO / Attu / MongoDB）
@@ -159,6 +159,13 @@ EcomKbAgent/
 │   │   │   ├── query_router.py   #     /query、/stream、/history、/health
 │   │   │   └── task_router.py    #     /status/{task_id}（导入与查询共用）
 │   │   └── schemas/              #     Pydantic 请求/响应模型
+│   │       ├── query_schema.py   #     查询请求体（含字段校验）
+│   │       ├── import_schema.py  #     /upload、/status 的响应模型（response_model）
+│   │       └── history_schema.py #     /history 响应模型（Mongo _id 走 alias）
+│   │
+│   ├── services/                 # ── 服务层（承接路由的后台动作）──
+│   │   ├── import_service.py     #     invoke_import_graph（导入图后台执行）+ save_upload_files（上传落盘）
+│   │   └── query_service.py      #     run_query_graph（查询图执行，保持同步签名以适配线程池）
 │   │
 │   ├── pipelines/                # ── 业务编排层（LangGraph）──
 │   │   ├── import_pipeline/
@@ -384,10 +391,10 @@ modelscope download --model BAAI/bge-reranker-large --local_dir <你的缓存目
 
 ### 4.6 启动服务
 
-`main.py` 提供三种启动模式，路由按需装配：
+`main.py` 提供四种启动模式，路由按需装配：
 
 ```bash
-# 合并模式：同时挂载导入与查询路由，监听 0.0.0.0:8000
+# 合并模式：单进程同时挂载导入与查询路由，监听 0.0.0.0:8000（默认）
 python main.py --service all
 
 # 仅导入服务：监听 127.0.0.1:8000
@@ -395,7 +402,14 @@ python main.py --service import
 
 # 仅查询服务：监听 127.0.0.1:8001
 python main.py --service query
+
+# 双端口并发：同进程同时起 import(:8000) 与 query(:8001)，便于本地开发/演示
+python main.py --service both
 ```
+
+> `both` 模式下两个服务跑在同一进程、同一事件循环：BGE-M3 与 Reranker 的同步 CPU 密集计算会互相争用，
+> 因此它定位为"本地开发 / 演示便利"；**生产建议用 `import` / `query` 分离部署为两个进程**。
+> 该模式下前端 SPA 仅由 query 侧（:8001）托管，import 侧（:8000）只提供 API。
 
 开发调试推荐带热重载：
 
@@ -418,7 +432,7 @@ uvicorn app.api.app_factory:create_app --factory --reload --host 127.0.0.1 --por
 
 ### 4.7 前端开发与构建（React + pnpm）
 
-前端位于 `frontend/`，基于 React 19 + TypeScript + Vite 6。开发态由 Vite 提供 dev server（默认 `http://localhost:5173`），并把 `/import-api`、`/query-api` 两类请求代理到后端（默认 `127.0.0.1:8000`，可在 `.env` 覆盖）。生产态用 `pnpm run build` 产出 `dist/`，由后端 `app_factory.py` 直接托管（仅 `all` 模式，见下方说明）。
+前端位于 `frontend/`，基于 React 19 + TypeScript + Vite 6。开发态由 Vite 提供 dev server（默认 `http://localhost:5173`），并把 `/import-api`、`/query-api` 两类请求代理到后端（默认 `127.0.0.1:8000`，可在 `.env` 覆盖）。生产态用 `pnpm run build` 产出 `dist/`，由后端 `app_factory.py` 直接托管（`all` 模式挂 `:8000/`，`both` 模式挂 query 侧 `:8001/`，见下方说明）。
 
 ```bash
 cd frontend
@@ -447,7 +461,7 @@ pnpm run preview
 | `VITE_DEV_QUERY_TARGET`   | `http://127.0.0.1:8000`  | 开发代理目标：后端 `all` 模式填 8000；`query` 拆分模式填 8001     |
 
 
-> ℹ️ **生产部署**：后端 `app_factory.py` 已在 `all` 模式下挂载 `frontend/dist/`（挂在所有 API 路由之后，`/` 直接返回 `index.html`）。执行 `pnpm run build`（Vite 自动读取 `frontend/.env.production`，把 API 前缀设为同源 `/`）后，直接访问 `http://127.0.0.1:8000/` 即可，无需再开 Vite。拆分模式（`import`/`query`）不挂载 SPA，仍走 Vite dev server。
+> ℹ️ **生产部署**：后端 `app_factory.py` 在 `all` 模式下挂载 `frontend/dist/`（挂在所有 API 路由之后，`/` 直接返回 `index.html`）；`both` 模式下由 query 侧（`:8001`）挂载。执行 `pnpm run build`（Vite 自动读取 `frontend/.env.production`，把 API 前缀设为同源 `/`）后，直接访问 `http://127.0.0.1:8000/`（`all`）或 `http://127.0.0.1:8001/`（`both`）即可，无需再开 Vite。单服务拆分模式（`import`/`query`）不挂载 SPA，仍走 Vite dev server。
 
 
 ---
@@ -728,13 +742,17 @@ python -m app.pipelines.import_pipeline.graph
 - [x] **中间件连通性自检脚本** — 新增 `scripts/check_connections.py`（`python -m scripts.check_connections`），逐项探测 Milvus / MongoDB / MinIO / LLM / MCP，本地模型检测为可选开关，退出码可接入 CI
 - [x] **顺带修正的历史遗留** — `node_rrf.py` 4 个未使用导入（含无谓加载的 `embedding_config`）；`step_6_deal_state` 三条分支返回值不一致；`import_pipeline/graph.py` 测试状态中的游离字段 `user_id` 与误导性注释；`node_item_name_recognition.py` 死常量 `SINGLE_CHUNK_CONTENT_MAX_LEN` 已标注为"当前未使用"（是否删除需另行确认，因其牵涉是否补做"单切片截断"逻辑）
 
-### 10.2 规划中
-
 **阶段 C：接口与启动**
 
-- [ ] 补齐 `/upload`、`/status`、`/history` 的响应 Schema 与 `response_model`（须保留 `task_ids` 多文件语义与 `code` 字段）
-- [ ] 抽取服务层 `app/services/`，把路由内联的后台任务函数迁出，路由只做参数绑定；并在此层补上"节点异常时清理 running 列表"（该逻辑依赖追踪键与 `is_stream`，放在 utils 层会造成 core↔utils 循环依赖，故不适合放进 `node_guard`）
-- [ ] `main.py` 增加 `--service both`，同进程并发启动 8000 / 8001（并修正 `import` / `query` 分支的 host 不一致）；需同时处理"两个 app 都不满足静态资源挂载条件"的问题
+- [x] **响应 Schema 补齐 + `response_model`** — 新增 `app/api/schemas/import_schema.py`（`UploadResponse` / `TaskStatusResponse`）与 `history_schema.py`（`HistoryItem` 用 `alias="_id"` + `HistoryResponse`），为 `/upload`、`/status/{task_id}`、`/history/{session_id}` 挂上 `response_model`。**保留多文件 `task_ids` 语义与 `code` 字段**（改造文档 §8 C-1）；三接口返回体键集合与改动前完全一致，`/docs` 已出现响应模型
+- [x] **服务层抽取 `app/services/`** — 新增 `import_service.py`（`invoke_import_graph` 逐行迁出 + `save_upload_files` 收纳落盘逻辑）与 `query_service.py`（`run_query_graph` 逐行迁出，**保持同步签名**以适配 `run_in_threadpool`，见 §8 C-3）；路由退化为参数绑定，`Depends` 注入方式不变，服务层不反向依赖 `app.api`（无环）
+- [x] **`--service both` 双端口并发 + `mount_frontend`** — `main.py` 新增 `both` 分支（同进程并发 import:8000 与 query:8001，并用共享退出信号保证一次 Ctrl+C 两个服务同时干净退出）；`create_app` 增加 `mount_frontend` 参数（默认 `None`=沿用原语义），both 下**仅 query 侧挂载 SPA**，解决"两个 app 都不挂前端"的兼容点（§8 C-7）
+
+### 10.2 规划中
+
+**阶段 C 后续（可选增强）**
+
+- [ ] 服务层补"节点异常时清理 running 列表"：该逻辑依赖追踪键与 `is_stream`，放 `node_guard` 会造成 core↔utils 循环依赖，故落在服务层。**本阶段刻意未做**——它会改变运行时行为，与 C2 的"函数体逐行等价 / 日志逐节点对齐"验收冲突，宜单独立项评估
 
 **阶段 D：功能扩展**
 

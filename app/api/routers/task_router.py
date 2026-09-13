@@ -10,6 +10,7 @@ from typing import Any, Dict
 from fastapi import APIRouter
 
 from app.core.logger import logger
+from app.api.schemas.import_schema import TaskStatusResponse
 from app.utils.task_utils import (
     get_task_status, get_done_task_list, get_running_task_list
 )
@@ -17,7 +18,12 @@ from app.utils.task_utils import (
 task_router = APIRouter(tags=["task"])
 
 
-@task_router.get("/status/{task_id}", summary="任务状态查询", description="根据TaskID查询单个任务的进度和全局状态")
+@task_router.get(
+    "/status/{task_id}",
+    summary="任务状态查询",
+    description="根据TaskID查询单个任务的进度和全局状态",
+    response_model=TaskStatusResponse,
+)
 async def get_task_progress(task_id: str):
     """
     任务状态查询接口

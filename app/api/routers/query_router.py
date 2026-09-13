@@ -7,13 +7,11 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.logger import logger
 from app.api.schemas.query_schema import QuerySchema
+from app.api.schemas.history_schema import HistoryResponse
 from app.api.dependencies import get_query_pipeline
-from app.pipelines.query_pipeline.state import create_query_default_state
-from app.utils.task_utils import (
-    clear_task, update_task_status, get_task_result, get_done_task_list,
-    TASK_STATUS_PROCESSING, TASK_STATUS_COMPLETED, TASK_STATUS_FAILED
-)
-from app.utils.sse_utils import create_sse_queue, SSEEvent, sse_generator, push_to_session
+from app.services.query_service import run_query_graph
+from app.utils.task_utils import get_task_result, get_done_task_list
+from app.utils.sse_utils import create_sse_queue, sse_generator
 from app.repositories.history_repo import get_recent_messages, clear_history
 
 query_router = APIRouter(tags=["query"])
@@ -27,43 +25,6 @@ def health():
     return {
         "ok": True
     }
-
-
-# 同步方法：执行查询图（graph 通过依赖注入传入，避免路由层直接持有编译对象）
-def run_query_graph(session_id: str, query: str, is_stream: bool, graph):
-    """执行query graph"""
-    try:
-        # 清空原有的任务列表
-        clear_task(session_id)
-
-        # 更新新状态
-        update_task_status(session_id, TASK_STATUS_PROCESSING, is_stream)
-
-        # 再执行
-        initial_state = (create_query_default_state(
-            session_id=session_id,
-            original_query=query,
-            is_stream=is_stream
-        ))
-        state = graph.invoke(initial_state)
-        update_task_status(session_id, TASK_STATUS_COMPLETED, is_stream)
-
-        # final事件一定最后推送, 因为他会关闭本次流
-        image_urls = state['image_urls']
-        push_to_session(
-            session_id,
-            SSEEvent.FINAL,
-            {
-                "answer": get_task_result(session_id, "answer"),
-                "status": "completed",
-                "image_urls": image_urls
-            }
-        )
-    except Exception as e:
-        logger.exception(f"执行{session_id}对应查询问题:{query},任务执行失败! 错误信息:{str(e)}")
-        update_task_status(session_id, TASK_STATUS_FAILED, is_stream)
-        # 推送指定类型的事件
-        push_to_session(session_id, SSEEvent.ERROR, {"error": str(e)})
 
 
 # 接口三: 前端提问查询接口
@@ -111,7 +72,7 @@ async def stream_query_result(session_id: str, request: Request):
 
 
 # 接口五: 查询历史聊天记录
-@query_router.get("/history/{session_id}")
+@query_router.get("/history/{session_id}", response_model=HistoryResponse)
 def get_history(session_id: str, limit: int = 10):
     records = get_recent_messages(session_id, limit=limit)
     items = []

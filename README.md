@@ -68,9 +68,9 @@ EcomKbAgent 针对这三点设计：**用 MinerU 做高质量 PDF→Markdown 解
 ### 1.2 核心功能
 
 1. **知识导入（Import Pipeline）**：上传 PDF / Markdown → MinerU 解析 → 插图语义化 → 语义切分 → 商品主体识别 → BGE-M3 稠密+稀疏向量化 → 写入 Milvus。
-2. **知识问答（Query Pipeline）**：问题改写与主体识别 → 三路并发召回（向量检索 / HyDE / 联网搜索）→ RRF 融合 → Cross-Encoder 重排 → 带引用生成答案。
+2. **知识问答（Query Pipeline）**：问题改写与主体识别 → 四路并发召回（向量检索 / HyDE / 知识图谱 / 联网搜索）→ RRF 融合 → Cross-Encoder 重排 → 带引用生成答案。
 3. **多轮会话**：MongoDB 持久化历史消息，支持上下文指代消解（"它怎么关机？"）、历史查询与清空。
-4. **任务可视化**：导入与查询共用一套任务追踪机制，前端可实时看到"检查文件 → PDF转Markdown → 图片处理 → …"的节点级进度。
+4. **任务可视化**：导入与查询共用一套任务追踪机制，前端可实时看到"检查文件 → PDF转Markdown → 图片处理 → … → 导入知识图谱"的节点级进度；问答页另有查询链路执行流程图（四路并行召回 → 融合 → 重排 → 生成答案）。
 5. **流式输出**：基于 SSE 推送 `ready / progress / delta / final / error` 事件，前端逐字渲染。
 
 ### 1.3 关键特性
@@ -145,7 +145,7 @@ EcomKbAgent/
 ├── main.py                       # 统一服务入口：--service {all|import|query|both}
 ├── pyproject.toml                # 后端项目元数据与依赖声明（uv 管理）
 ├── uv.lock                       # 后端依赖锁定文件
-├── docker-compose.yaml           # 基础设施编排（Milvus / etcd / MinIO / Attu / MongoDB）
+├── docker-compose.yaml           # 基础设施编排（Milvus / etcd / MinIO / Attu / MongoDB / Neo4j）
 ├── .env                          # 本地环境变量（含密钥，已在 .gitignore 中排除）
 ├── .env.example                  # 环境变量样例（脱敏占位符，可提交；cp .env.example .env 后填写）
 │
@@ -171,11 +171,11 @@ EcomKbAgent/
 │   │   ├── import_pipeline/
 │   │   │   ├── graph.py          #     导入状态图：节点注册 + 条件边 + 编译
 │   │   │   ├── state.py          #     ImportGraphState（TypedDict）与默认状态工厂
-│   │   │   └── nodes/            #     7 个导入节点（见 6.1）
+│   │   │   └── nodes/            #     8 个导入节点（见 6.1）
 │   │   └── query_pipeline/
-│   │       ├── graph.py          #     查询状态图：并行三路召回 + 汇聚
+│   │       ├── graph.py          #     查询状态图：并行四路召回 + 汇聚
 │   │       ├── state.py          #     QueryGraphState（TypedDict）
-│   │       └── nodes/            #     7 个查询节点（见 6.2）
+│   │       └── nodes/            #     8 个查询节点（见 6.2）
 │   │
 │   ├── clients/                  # ── 外部客户端层 ──
 │   │   ├── llm_client.py         #     门面：get_llm_client(model, json_mode)
@@ -184,6 +184,7 @@ EcomKbAgent/
 │   │   ├── milvus_client.py      #     门面：get_milvus_client()
 │   │   ├── minio_client.py       #     门面：get_minio_client()
 │   │   ├── mongo_client.py       #     门面：get_history_mongo_tool()
+│   │   ├── neo4j_client.py       #     门面：get_neo4j_driver()
 │   │   └── manager/              #     各客户端的单例管理器（init / close / 懒加载兜底）
 │   │
 │   ├── conf/                     # ── 配置层 ──
@@ -193,6 +194,7 @@ EcomKbAgent/
 │   │   ├── milvus_config.py      #     Milvus：地址 + 三个集合名
 │   │   ├── minio_config.py       #     MinIO：endpoint、密钥、bucket、图片目录
 │   │   ├── mongo_config.py       #     MongoDB：连接串、库名
+│   │   ├── neo4j_config.py       #     Neo4j：uri、用户名 / 密码、数据库名
 │   │   ├── mineru_config.py      #     MinerU：API Base URL + Token
 │   │   ├── bailian_mcp_config.py #     MCP：百炼 WebSearch 服务地址
 │   │   ├── import_pipeline_config.py  # 导入链路可调参数（切分 / 商品名上下文 / 向量批量 / 图片摘要限流）
@@ -200,7 +202,8 @@ EcomKbAgent/
 │   │
 │   ├── repositories/             # ── 数据访问层 ──
 │   │   ├── history_repo.py       #     会话历史的增删改查（MongoDB）
-│   │   └── vector_search_repo.py #     混合检索请求构建、hybrid_search、按 chunk_id 批量取回
+│   │   ├── vector_search_repo.py #     混合检索请求构建、hybrid_search、按 chunk_id 批量取回
+│   │   └── graph_repo.py         #     知识图谱纯 Cypher 执行（实体 / 关系 / 一跳扩展）
 │   │
 │   ├── prompts/
 │   │   └── loader.py             #     load_prompt(name, **kwargs)：读取并渲染 prompts/ 下的模板
@@ -224,6 +227,7 @@ EcomKbAgent/
 │   ├── item_name_recognition.prompt          # 导入时识别文档主体
 │   ├── image_summary.prompt                  # 图片语义摘要（VLM）
 │   ├── product_recognition_system.prompt     # 商品识别系统提示词
+│   ├── knowledge_graph.prompt                # 知识图谱实体 / 关系抽取（导入侧）
 │   └── answer_out.prompt                     # 最终答案生成（含引用约束）
 │
 ├── frontend/                     # 前端工程（React 19 + TypeScript + Vite，需构建）
@@ -311,6 +315,7 @@ docker compose ps
 | Milvus 内置 MinIO | `ecomkb-milvus-minio` | `9002` / `9003`  | Milvus 内部对象存储                            |
 | Attu            | `ecomkb-attu`         | `8000`           | Milvus 可视化管理界面                           |
 | MongoDB         | `ecomkb-mongo`        | `27017`          | 会话历史存储                                   |
+| Neo4j           | `ecomkb-neo4j`        | `7474` / `7687`  | 知识图谱（Browser `http://127.0.0.1:7474` / Bolt `7687`），**可选** |
 
 ### 4.4 配置环境变量
 
@@ -353,10 +358,13 @@ cp .env.example .env        # 直接由样例文件生成，再按实际环境�
 |           | `ITEM_NAME_COLLECTION`                      | `kd_db_item_names`                                         | 商品主体集合名                                             |
 | MongoDB   | `MONGO_URL`                                 | `mongodb://127.0.0.1:27017`                                | 连接串                                                 |
 |           | `MONGO_DB_NAME`                             | `knowledge_db_history`                                     | 数据库名                                                |
+| Neo4j     | `NEO4J_URI`                                 | `bolt://127.0.0.1:7687`                                    | 连接地址（**必须带** `bolt://`）；知识图谱为可选能力                   |
+|           | `NEO4J_USER` / `NEO4J_PASSWORD`             | `neo4j` / `neo4j123456`                                    | 需与 `docker-compose.yaml` 的 `NEO4J_AUTH` 一致          |
+|           | `NEO4J_DATABASE`                            | `neo4j`                                                    | 数据库名（Community 版固定）                                 |
 | 可选        | `WARMUP_ENABLE`                             | `false`                                                    | 设为 `true` 可在启动时预加载 Embedding / Reranker 本地模型（默认懒加载） |
 
-> 说明：`ENTITY_NAME_COLLECTION`、`EMBEDDING_DIM`、`MILVUS_METRIC_TYPE`、`MILVUS_MIN_COSINE_SCORE`、`MILVUS_USER`、`MILVUS_PASSWORD` 目前为**预留配置项**，代码尚未读取（当前 `docker-compose.yaml` 的 Milvus 未开启鉴权）；切片集合的稠密向量维度在 `node_import_milvus.py` 中固定为 **1024**（BGE-M3 原生维度）。
-> 另：`MINERU_MODEL_SOURCE`、`MODELSCOPE_CACHE`、`MODELSCOPE_OFFLINE`、`HF_HOME`、`MD_ROOT_DIR` 由 MinerU / ModelScope / HuggingFace 等第三方库隐式读取，代码中不显式 `os.getenv`。
+> 说明：`EMBEDDING_DIM`、`MILVUS_METRIC_TYPE`、`MILVUS_MIN_COSINE_SCORE`、`MILVUS_USER`、`MILVUS_PASSWORD` 目前为**预留配置项**，代码尚未读取（当前 `docker-compose.yaml` 的 Milvus 未开启鉴权）；切片集合的稠密向量维度在 `node_import_milvus.py` 中固定为 **1024**（BGE-M3 原生维度）。
+> 另：`ENTITY_NAME_COLLECTION` 已被知识图谱链路使用（`node_import_kg` 写入 / `node_query_kg` 检索）；`MINERU_MODEL_SOURCE`、`MODELSCOPE_CACHE`、`MODELSCOPE_OFFLINE`、`HF_HOME`、`MD_ROOT_DIR` 由 MinerU / ModelScope / HuggingFace 等第三方库隐式读取，代码中不显式 `os.getenv`。
 
 **链路可调参数（全部可选，默认值写在代码里）**
 
@@ -409,7 +417,7 @@ python main.py --service both
 
 > `both` 模式下两个服务跑在同一进程、同一事件循环：BGE-M3 与 Reranker 的同步 CPU 密集计算会互相争用，
 > 因此它定位为"本地开发 / 演示便利"；**生产建议用 `import` / `query` 分离部署为两个进程**。
-> 该模式下前端 SPA 仅由 query 侧（:8001）托管，import 侧（:8000）只提供 API。
+> 该模式下前端 SPA 仅由 query 侧（:8001）托管，import 侧（:8000）只提供 API。**前端会自动把导入类请求（`/upload`、`/status`）指向同主机的 `:8000`**（实现见 `frontend/src/lib/kbApi.ts` 的 `resolveImportBase`）——否则同源请求会命中 8001 上的静态资源挂载点并返回 `405 Method Not Allowed`。
 
 开发调试推荐带热重载：
 
@@ -432,7 +440,7 @@ uvicorn app.api.app_factory:create_app --factory --reload --host 127.0.0.1 --por
 
 ### 4.7 前端开发与构建（React + pnpm）
 
-前端位于 `frontend/`，基于 React 19 + TypeScript + Vite 6。开发态由 Vite 提供 dev server（默认 `http://localhost:5173`），并把 `/import-api`、`/query-api` 两类请求代理到后端（默认 `127.0.0.1:8000`，可在 `.env` 覆盖）。生产态用 `pnpm run build` 产出 `dist/`，由后端 `app_factory.py` 直接托管（`all` 模式挂 `:8000/`，`both` 模式挂 query 侧 `:8001/`，见下方说明）。
+前端位于 `frontend/`，基于 React 19 + TypeScript + Vite 6。开发态由 Vite 提供 dev server（默认 `http://localhost:5173`），并把 `/import-api`、`/query-api` 两类请求代理到后端（默认 `127.0.0.1:8000`，可在 `.env` 覆盖）。生产态用 `pnpm run build` 产出 `dist/`，由后端 `app_factory.py` 直接托管（`all` 模式挂 `:8000/`，`both` 模式挂 query 侧 `:8001/`，见下方说明）。接口前缀在开发态走 Vite 代理（`/import-api`、`/query-api`），生产态为同源（`VITE_*_API=/`）；`both` 模式下 `lib/kbApi.ts` 会自动把导入类请求指向同主机 `:8000`，无需改配置。
 
 ```bash
 cd frontend
@@ -472,7 +480,7 @@ pnpm run preview
 
 前端为单页应用（SPA），使用 HashRouter，两个主页面通过左侧导航 / 移动端底栏互跳：
 
-- **问答页**（`#/chat`、`#/chat/:sessionId`）：基于知识库提问，支持多轮会话、流式逐字输出、节点级流水线进度（检查文件 → PDF转Markdown → 图片处理 → 文档切分 → 主体识别 → 向量生成 → 导入），答案附带来源引用与配图链接；左侧为会话列表，可新建 / 切换 / 清空历史。
+- **问答页**（`#/chat`、`#/chat/:sessionId`）：基于知识库提问，支持多轮会话、流式逐字输出、**查询链路执行流程图**（确认问题产品 → 四路并行召回：切片 / 切片(假设性文档) / 网络 / 知识图谱 → 倒排融合 → 重排序 → 生成答案，含「需澄清」短路支线），答案附带来源引用与配图链接；左侧为会话列表，可新建 / 切换 / 清空历史。
 - **导入页**（`#/import`）：上传 PDF / Markdown，实时展示导入任务进度与节点状态，导入完成即可回到问答页提问。
 
 访问步骤：
@@ -522,13 +530,14 @@ curl -X POST "http://127.0.0.1:8001/query" \
 **④ 提问（流式，SSE）**
 
 ```bash
-# 1) 发起异步查询，拿到 session_id
+# 1) 发起异步查询，响应同时返回 session_id（会话）与 task_id（任务）
 curl -X POST "http://127.0.0.1:8001/query" \
   -H "Content-Type: application/json" \
-  -d '{"query": "HAK180 怎么设置温度？", "is_stream": true}'
+  -d '{"query": "HAK180 怎么设置温度？", "session_id": "demo-001", "is_stream": true}'
+# => {"message":"结果正在处理中...","session_id":"demo-001","task_id":"9c2e..."}
 
-# 2) 建立 SSE 长连接，接收 ready / progress / delta / final / error 事件
-curl -N "http://127.0.0.1:8001/stream/<session_id>"
+# 2) 建立 SSE 长连接（用 task_id），接收 ready / progress / delta / final / error 事件
+curl -N "http://127.0.0.1:8001/stream/<task_id>"
 ```
 
 **⑤ 查询与清空历史**
@@ -543,14 +552,15 @@ curl -X DELETE "http://127.0.0.1:8001/history/demo-001"
 | 方法       | 路径                      | 说明                                          |
 | -------- | ----------------------- | ------------------------------------------- |
 | `POST`   | `/upload`               | 多文件上传（form-data），每个文件生成一个 `task_id` 并触发导入流程 |
-| `GET`    | `/status/{task_id}`     | 查询任务进度（导入用 `task_id`，查询用 `session_id`）      |
+| `GET`    | `/status/{task_id}`     | 查询任务进度（导入、查询**统一**用 `task_id`）              |
 | `GET`    | `/health`               | 健康检查                                        |
 | `POST`   | `/query`                | 提问，支持 `is_stream` 切换同步/异步流式                 |
-| `GET`    | `/stream/{session_id}`  | SSE 事件流（节点进度 + 答案增量）                        |
+| `GET`    | `/stream/{key}`         | SSE 事件流（节点进度 + 答案增量）；`key` 为 `task_id`（兼容期可传 `session_id`，服务端按别名回退） |
 | `GET`    | `/history/{session_id}` | 获取最近 N 条会话记录（默认 10）                         |
 | `DELETE` | `/history/{session_id}` | 清空指定会话的历史记录                                 |
 
 > `session_id` 需匹配 `[A-Za-z0-9-]{1,64}`；不传时服务端自动生成 UUID。  
+> ⭐ `task_id` / `session_id` 语义分离（§I-11）：`session_id` 用于会话历史聚合，`task_id` 用于 SSE 队列与任务追踪；`POST /query` 两个都返回，前端优先用 `task_id`，同一会话可并发多轮查询互不覆盖。  
 > 前端通过 Vite 代理以 `/import-api`、`/query-api` 前缀调用上述接口（见 4.7）。
 
 ---
@@ -573,6 +583,7 @@ curl -X DELETE "http://127.0.0.1:8001/history/demo-001"
 | `node_item_name_recognition` | 取前 5 个切片（单块截断 800 字符、总量 2500 字符）交给 LLM 识别商品主体名，并写入 `item_name` 集合                                               |
 | `node_bge_embedding`         | 按批（5 条/批）用「主体:{item_name},内容:{content}」拼接后生成 dense + sparse 向量，单批失败不影响整体                                        |
 | `node_import_milvus`         | 建集合与索引（dense: AUTOINDEX/IP；sparse: SPARSE_INVERTED_INDEX/IP + DAAT_MAXSCORE）→ 按 `item_name` 删除旧数据（幂等重导入）→ 写入新切片 |
+| `node_import_kg`             | **线性尾插**（Milvus 之后）：逐切片调 LLM 抽取实体/关系 → 清洗过滤（截断 / 白名单 / 关系降级 / 去重）→ 实体名向量入实体集合 → 三元组入 Neo4j → 落 `kg.json`。属**可选能力**：失败只告警、不阻断导入 |
 
 切片集合 Schema：
 
@@ -597,9 +608,10 @@ curl -X DELETE "http://127.0.0.1:8001/history/demo-001"
 | `node_search_embedding`      | 改写问题向量化后在 Milvus 做混合检索，以 `item_name in [...]` 过滤，`WeightedRanker(0.8, 0.2)`、`norm_score=True`、`limit=5` |
 | `node_search_embedding_hyde` | LLM 先生成假设性答案，再以「原问题 + 假设答案」联合向量化检索，补充语义召回                                                               |
 | `node_web_search_mcp`        | 通过 MCP Streamable HTTP 调用百炼 `bailian_web_search`，为库外问题提供兜底语料                                            |
-| `node_rrf`                   | RRF 倒排融合（`(1/(k+rank)) * weight`，`k=60`，取 Top5），当前融合向量路与 HyDE 路                                         |
-| `node_rerank`                | 统一本地切片与网页结果的数据格式 → bge-reranker-large 打分 → 断崖式动态 TopK（阈值 0.25 / 0.5，上限 10）                              |
-| `node_answer_output`         | 组装引用化 Prompt（上下文上限 12000 字符）→ LLM 生成 → 抽取图片 URL → 落库历史 → SSE 推送 final 事件                                |
+| `node_query_kg`              | 第 4 路并行召回：问题向量对齐实体集合取种子实体 → Neo4j 一跳扩展 → 组装 `kg_chunks`（`entity.type="kg"`）与 `graph_relation_description`（一行一条关系）。属**可选能力**，失败只告警               |
+| `node_rrf`                   | RRF 倒排融合（`(1/(k+rank)) * weight`，`k=60`，取 Top5），融合向量路 / HyDE 路 / 图谱路（权重 0.7）                            |
+| `node_rerank`                | 统一本地切片与网页结果的数据格式 → bge-reranker-large 打分 → 断崖式动态 TopK（阈值 0.25 / 0.5，**下限 3** / 上限 10）→ **分区保底**（本地切片至少 3 条，防被高分网页挤出证据）                              |
+| `node_answer_output`         | 组装引用化 Prompt（四区：本地 / 图谱 / 联网 / 历史，上下文上限 12000 字符）→ LLM 生成 → 抽取图片 URL → 落库历史 → SSE 推送 final 事件。其中**图谱区直读 `state`**（不经 RRF / rerank，保底必达）          |
 
 ### 6.3 基础设施层
 
@@ -609,9 +621,9 @@ curl -X DELETE "http://127.0.0.1:8001/history/demo-001"
 | `app/core/logger.py`      | Loguru 双通道日志；`@node_log` / `@step_log` 装饰器自动打印节点与步骤的进入、耗时、异常                       |
 | `app/core/exceptions.py`  | 领域异常体系：`AppError` 基类（携带 `node_name` / `cause`），下设配置、导入、查询、存储四支；`StateFieldError` 额外结构化字段名与期望类型 |
 | `app/utils/task_utils.py` | 内存态任务追踪（`pending/processing/completed/failed`），含节点名 → 中文名映射，供前端展示                  |
-| `app/utils/sse_utils.py`  | 每个 `session_id` 一个队列，`push_to_session()` 推送 `ready/progress/delta/final/error` 事件  |
+| `app/utils/sse_utils.py`  | 每个队列主键（`task_id`）一个队列；`session_id` 可注册为**别名**指向同一队列（兼容兜底），`push_to_session()` 推送 `ready/progress/delta/final/error` 事件  |
 | `app/core/rate_limit.py`  | 滑动窗口限速（默认 60 秒 9 次），用于 VLM/LLM 调用保护                                                |
-| `app/repositories/`       | 数据访问封装：MongoDB 会话历史、Milvus 混合检索与按 ID 批量取回                                          |
+| `app/repositories/`       | 数据访问封装：MongoDB 会话历史、Milvus 混合检索与按 ID 批量取回、Neo4j 图谱（纯 Cypher）                     |
 
 
 ---
@@ -651,9 +663,10 @@ def step_1_do_something(state):
 @node_guard("node_xxx")
 @node_log("node_xxx")
 def node_xxx(state):
-    add_running_task(state["session_id"], "node_xxx", state.get("is_stream"))
+    # 追踪 key：优先 state["task_id"]，缺失自动回退 session_id（§I-11）
+    add_running_task(resolve_trace_key(state), "node_xxx", state.get("is_stream"))
     result = step_1_do_something(state)
-    add_done_task(state["session_id"], "node_xxx", state.get("is_stream"))
+    add_done_task(resolve_trace_key(state), "node_xxx", state.get("is_stream"))
     return {"your_field": result}
 ```
 
@@ -703,7 +716,7 @@ python -m app.pipelines.import_pipeline.graph
 `doc/` 存放厂商产品手册 PDF（约 85 个 / 404MB），涉及厂商文档版权且体积较大，已通过 `.gitignore` 排除。请自行放置需要入库的 PDF。
 
 **Q6：任务进度在哪里看？**  
-调用 `/status/{task_id}`（导入用上传返回的 `task_id`，查询用 `session_id`），返回 `status` 与 `done_list` / `running_list`。
+调用 `/status/{task_id}`（导入、查询均用 `task_id`；查询流程的 `task_id` 由 `POST /query` 返回），返回 `status` 与 `done_list` / `running_list`。
 
 **Q7：任务状态在重启后丢失？**  
 当前任务追踪是单进程内存态实现。多实例部署或需要持久化时，应将其替换为 Redis 等外部存储（见[路线图](#十路线图)）。
@@ -748,16 +761,22 @@ python -m app.pipelines.import_pipeline.graph
 - [x] **服务层抽取 `app/services/`** — 新增 `import_service.py`（`invoke_import_graph` 逐行迁出 + `save_upload_files` 收纳落盘逻辑）与 `query_service.py`（`run_query_graph` 逐行迁出，**保持同步签名**以适配 `run_in_threadpool`，见 §8 C-3）；路由退化为参数绑定，`Depends` 注入方式不变，服务层不反向依赖 `app.api`（无环）
 - [x] **`--service both` 双端口并发 + `mount_frontend`** — `main.py` 新增 `both` 分支（同进程并发 import:8000 与 query:8001，并用共享退出信号保证一次 Ctrl+C 两个服务同时干净退出）；`create_app` 增加 `mount_frontend` 参数（默认 `None`=沿用原语义），both 下**仅 query 侧挂载 SPA**，解决"两个 app 都不挂前端"的兼容点（§8 C-7）
 
+**阶段 D：功能扩展（知识图谱）**
+
+- [x] **D1 KG 基础设施** — `docker-compose.yaml` 新增 `neo4j` 服务（7474/7687 + 命名卷 `neo4j_data` / `neo4j_logs`）；新增 `app/conf/neo4j_config.py`、`app/clients/manager/neo4j_client_manager.py`（`init()` 幂等 + `verify_connectivity()`）、`app/clients/neo4j_client.py` 门面、`app/repositories/graph_repo.py`（纯 Cypher + 常量）；`lifespan` 把 Neo4j 归入**可选依赖**（失败仅告警）；`scripts/check_connections.py` 增 Neo4j 探测
+- [x] **D2 KG 导入侧** — 新增 `prompts/knowledge_graph.prompt`（自拟电商实体 / 关系类型 + few-shot，JSON 字面大括号按既有约定转义）与 `node_import_kg.py`（7 个 step：校验 → 清理 → 抽取 → 清洗过滤 → 实体向量入库 → 三元组入库 → `kg.json` 备份）；导入图**线性尾插** `node_import_milvus → node_import_kg → END`（既有节点入度 / 出度不变）；`ImportGraphState` 增 `kg_result`
+- [x] **D3 KG 查询侧** — 新增 `node_query_kg.py`（实体对齐 → 一跳扩展 → 组装 `kg_chunks`）；查询图按 **C-5 方案 A** 把并行扇出由 3 元扩为 4 元（不引入虚节点、不改既有边）；`node_rrf` 增图谱路（权重 0.7）；`node_rerank` 传播 `type="kg"`；`node_answer_output` 按 **C-6 成对改**（`_split_docs_by_type` 三分类 + 第四证据区，图谱预算从本地预算划分、**无图谱时零行为变化**）；`loader.py` 增**占位符完备性检查**（把上次裸 `KeyError → 500` 的坑变成结构性防御）
+- [x] **D3 收尾修正（真实 E2E 暴露）** — ① **图谱证据改由 `node_answer_output` 直读 `state`**（`graph_relation_description` → `kg_triples` → `reranked_docs` 逐级兜底），修复"43 条 KG 关系被 RRF Top5 + 断崖两道闸全部淘汰、答案退化为『未找到』"；② `RERANK_MIN_TOPK` **1 → 3**（对齐原型乙项目），修复"断崖把本地证据砍到 0"；③ 修复 `node_rerank.step_4_chunk_topk` 循环上界误用 `max_topk` 导致的**越界 `IndexError`**（候选数少于上限且分数平滑时必崩）；④ 新增**分区保底**（`RERANK_MIN_LOCAL_KEEP` 默认 3）——cross-encoder 是全局同池打分，会把本地的"安全警告式短句"挤到高分网页之后（本地仅剩最不相关那条、答案退化为"未找到"），故在断崖截断后按来源补足本地切片
+- [x] **D4 `task_id` / `session_id` 语义分离**（§I-11，契约级变更）— `QueryGraphState` 增 `task_id`；`POST /query` 生成 `task_id` 且**流式与非流式响应体同时返回** `session_id` + `task_id`；`create_sse_queue(task_id, alias=session_id)` 把 `session_id` 注册为**别名**指向同一队列（兼容兜底，前后端可分批上线）；`/stream/{key}` 语义改为队列主键；7 个查询节点的追踪 / 推送调用改走 `resolve_trace_key(state)`（优先 `task_id`、缺失自动回退 `session_id`，**零回归**），Mongo 历史读写仍按 `session_id` 聚合；前端 `useChat.ts` 用 `task_id ?? session_id` 建流。**收益**：同一会话内并发多轮查询互不覆盖
+
 ### 10.2 规划中
 
 **阶段 C 后续（可选增强）**
 
 - [ ] 服务层补"节点异常时清理 running 列表"：该逻辑依赖追踪键与 `is_stream`，放 `node_guard` 会造成 core↔utils 循环依赖，故落在服务层。**本阶段刻意未做**——它会改变运行时行为，与 C2 的"函数体逐行等价 / 日志逐节点对齐"验收冲突，宜单独立项评估
 
-**阶段 D：功能扩展**
+**阶段 D 后续**
 
-- [ ] 知识图谱链路（Neo4j）：LLM 抽取实体与关系 → 实体名向量入 Milvus → 三元组入 Neo4j，并在查询侧新增一路图谱召回（`Neo4jError` 异常类与 `node_guard` 已就绪）
-- [ ] `task_id` / `session_id` 语义分离，支持同一会话内并发多轮查询互不覆盖（涉及 SSE 契约与前端联动，需独立评估）
 - [ ] `node_guard` 从试点节点推广到其余节点（按"正在改动的节点顺手接入"的节奏推进，不做一次性批量替换）
 
 ### 10.3 待评估

@@ -7,6 +7,7 @@ from app.pipelines.query_pipeline.nodes.node_rrf import node_rrf
 from app.pipelines.query_pipeline.nodes.node_search_embedding import node_search_embedding
 from app.pipelines.query_pipeline.nodes.node_search_embedding_hyde import node_search_embedding_hyde
 from app.pipelines.query_pipeline.nodes.node_web_search_mcp import node_web_search_mcp
+from app.pipelines.query_pipeline.nodes.node_query_kg import node_query_kg
 from app.pipelines.query_pipeline.state import QueryGraphState
 from app.core.logger import logger
 
@@ -17,6 +18,7 @@ query_graph.add_node("node_item_name_confirm", node_item_name_confirm)
 query_graph.add_node("node_search_embedding", node_search_embedding)
 query_graph.add_node("node_search_embedding_hyde", node_search_embedding_hyde)
 query_graph.add_node("node_web_search_mcp", node_web_search_mcp)
+query_graph.add_node("node_query_kg", node_query_kg)
 query_graph.add_node("node_rrf", node_rrf)
 query_graph.add_node("node_rerank", node_rerank)
 query_graph.add_node("node_answer_output", node_answer_output)
@@ -35,7 +37,7 @@ def node_item_name_confirm_after_router(state: QueryGraphState):
         logger.warning(f"node_item_name_confirm_无法继续向后执行: {state['answer']}")
         return "node_answer_output"
     # 为空,可以正常执行,并发执行多路检索节点
-    return "node_search_embedding", "node_search_embedding_hyde", "node_web_search_mcp"
+    return "node_search_embedding", "node_search_embedding_hyde", "node_web_search_mcp", "node_query_kg"
 
 
 query_graph.add_conditional_edges("node_item_name_confirm"
@@ -44,12 +46,14 @@ query_graph.add_conditional_edges("node_item_name_confirm"
                                       "node_answer_output": "node_answer_output",
                                       "node_search_embedding": "node_search_embedding",
                                       "node_search_embedding_hyde": "node_search_embedding_hyde",
-                                      "node_web_search_mcp": "node_web_search_mcp"
+                                      "node_web_search_mcp": "node_web_search_mcp",
+                                      "node_query_kg": "node_query_kg"
                                   })
 # 5. 指定静态边
 query_graph.add_edge("node_search_embedding", "node_rrf")
 query_graph.add_edge("node_search_embedding_hyde", "node_rrf")
 query_graph.add_edge("node_web_search_mcp", "node_rrf")
+query_graph.add_edge("node_query_kg", "node_rrf")
 query_graph.add_edge("node_rrf", "node_rerank")
 query_graph.add_edge("node_rerank", "node_answer_output")
 query_graph.add_edge("node_answer_output", END)

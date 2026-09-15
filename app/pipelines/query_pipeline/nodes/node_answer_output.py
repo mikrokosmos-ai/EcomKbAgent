@@ -1,7 +1,7 @@
 import sys
 from app.utils.task_utils import add_running_task, add_done_task, set_task_result
 from app.utils.sse_utils import push_to_session, SSEEvent
-from app.pipelines.query_pipeline.state import QueryGraphState
+from app.pipelines.query_pipeline.state import QueryGraphState, resolve_trace_key
 from app.core.logger import logger, node_log, step_log
 from app.prompts.loader import load_prompt
 from app.clients.llm_client import get_llm_client
@@ -19,6 +19,10 @@ MAX_CONTEXT_CHARS = query_pipeline_config.max_context_chars
 LOCAL_EVIDENCE_BUDGET = query_pipeline_config.local_evidence_budget
 WEB_EVIDENCE_BUDGET = query_pipeline_config.web_evidence_budget
 HISTORY_BUDGET = MAX_CONTEXT_CHARS - LOCAL_EVIDENCE_BUDGET - WEB_EVIDENCE_BUDGET
+# 知识图谱证据区预算：从 LOCAL_EVIDENCE_BUDGET 中划分（图谱与切片同属"本地高信任"，
+# 不额外挤占总预算，从而保持 LOCAL + WEB + HISTORY = MAX 这一不变式）。
+# 且当本次无图谱证据时该预算归 0，本地切片独占全部 LOCAL 预算 —— 即"无图谱时零行为变化"。
+KG_EVIDENCE_BUDGET = query_pipeline_config.kg_evidence_budget
 
 # -----------------------------
 # 图片域名白名单：只允许输出本库 MinIO 上的图片，阻断外链注入
@@ -54,17 +58,22 @@ def _sanitize_evidence_text(text: str) -> str:
 
 def _split_docs_by_type(reranked_docs):
     """
-    分流：按 type 字段把重排结果拆成本地证据与联网证据。
-    约定：type == "milvus" 为本地知识库；其余（web / 缺失 / 未知）一律归入
-    最低信任的联网区 —— 默认值 fail-safe，宁可少信不可多信。
+    分流：按 type 字段把重排结果拆成**三区**（改造文档 §8 C-6）。
+    约定：
+        type == "milvus" → 本地知识库（高信任）
+        type == "kg"     → 本地知识图谱关系（高信任，独立成区，不再被误并入本地区）
+        其余（web / 缺失 / 未知）→ 联网区（最低信任，fail-safe：宁可少信不可多信）
     """
-    local_docs, web_docs = [], []
+    local_docs, kg_docs, web_docs = [], [], []
     for doc in reranked_docs or []:
-        if doc.get("type") == "milvus":
+        doc_type = doc.get("type")
+        if doc_type == "milvus":
             local_docs.append(doc)
+        elif doc_type == "kg":
+            kg_docs.append(doc)
         else:
             web_docs.append(doc)
-    return local_docs, web_docs
+    return local_docs, kg_docs, web_docs
 
 
 def _build_evidence(docs, index_prefix: str, budget: int) -> str:
@@ -94,6 +103,47 @@ def _build_evidence(docs, index_prefix: str, budget: int) -> str:
         blocks.append(block)
         used += len(block) + 2
     return "\n\n".join(blocks)
+
+
+def _truncate_lines(text: str, budget: int) -> str:
+    """按行累加截断到预算内（不切断单条关系），返回截断后的文本。"""
+    if budget <= 0:
+        return ""
+    if len(text) <= budget:
+        return text
+    lines, used = [], 0
+    for line in text.splitlines():
+        if used + len(line) + 1 > budget:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)
+
+
+def _build_kg_evidence(state, kg_docs_from_rerank, budget: int) -> str:
+    """
+    构建「知识图谱关系」证据区。
+    """
+    # 1. 优先：节点产出的关系描述
+    desc = _sanitize_evidence_text((state.get("graph_relation_description") or "").strip())
+    if desc:
+        return _truncate_lines(desc, budget)
+
+    # 2. 次选：结构化三元组现场组装
+    triple_lines = []
+    for triple in (state.get("kg_triples") or []):
+        if not isinstance(triple, dict):
+            continue
+        source = str(triple.get("source") or "").strip()
+        relation = str(triple.get("relation") or "").strip()
+        target = str(triple.get("target") or "").strip()
+        if source and relation and target:
+            triple_lines.append(_sanitize_evidence_text(f"{source} —[{relation}]→ {target}"))
+    if triple_lines:
+        return _truncate_lines("\n".join(triple_lines), budget)
+
+    # 3. 兜底：图谱证据确实进入了 reranked_docs
+    return _build_evidence(kg_docs_from_rerank, "K", budget)
 
 
 def _build_history(history, budget: int) -> str:
@@ -131,9 +181,9 @@ def step_1_check_answer(state) -> bool:
     if answer:
         if is_stream:
             logger.info("---Step 1: 发现已有答案，执行流式推送---")
-            push_to_session(state["session_id"], SSEEvent.DELTA, {"delta": answer})
+            push_to_session(resolve_trace_key(state), SSEEvent.DELTA, {"delta": answer})
         else:
-            set_task_result(state["session_id"], "answer", answer)
+            set_task_result(resolve_trace_key(state), "answer", answer)
         return True
     else:
         return False
@@ -162,14 +212,21 @@ def step_2_construct_prompt(state: QueryGraphState) -> str:
     item_names = state.get("item_names", [])
     reranked_docs = state.get("reranked_docs") or []
 
-    # 2 按来源分流：本地知识库（高信任）与联网结果（低信任）分别成区
+    # 2 按来源分流：本地知识库（高信任）/ 本地图谱关系（高信任）/ 联网结果（低信任）分别成区
     # 逻辑解释：
-    # 1. reranked_docs 每条带 type 字段：milvus=本地知识库，web=联网结果。
-    # 2. 两段证据各自独立预算（LOCAL_EVIDENCE_BUDGET / WEB_EVIDENCE_BUDGET），避免联网 snippet 与本地手册互相挤占。
+    # 1. reranked_docs 每条带 type 字段：milvus=本地知识库，kg=本地图谱关系，web=联网结果。
+    # 2. 三段证据各自独立预算（LOCAL / KG / WEB），避免联网 snippet 与本地手册互相挤占。
     # 3. 未知 / 缺失 type 一律归入联网区（最低信任），默认 fail-safe。
-    local_docs, web_docs = _split_docs_by_type(reranked_docs)
-    local_evidence = _build_evidence(local_docs, "", LOCAL_EVIDENCE_BUDGET) \
+    # 4. 图谱区来源为独立通道：直读 state（见 _build_kg_evidence），不再依赖 reranked_docs，
+    #    否则会因 cross-encoder 对结构化短句打分偏低而在 RRF/断崖两道闸被淘汰（对齐原型乙项目）。
+    local_docs, kg_docs, web_docs = _split_docs_by_type(reranked_docs)
+    kg_evidence = _build_kg_evidence(state, kg_docs, KG_EVIDENCE_BUDGET)
+    # 图谱证据预算从本地预算中划分：无图谱证据时归 0，本地切片独占全部 LOCAL 预算（无图谱 = 零行为变化）
+    kg_budget = KG_EVIDENCE_BUDGET if kg_evidence else 0
+    local_budget = LOCAL_EVIDENCE_BUDGET - kg_budget
+    local_evidence = _build_evidence(local_docs, "", local_budget) \
         or "（本次未检索到本地知识库内容，请如实说明未找到，不要推测。）"
+    kg_evidence = kg_evidence or "（本次未检索到本地知识图谱关系。）"
     web_evidence = _build_evidence(web_docs, "W", WEB_EVIDENCE_BUDGET) \
         or "（本次无联网补充资料。）"
 
@@ -186,6 +243,7 @@ def step_2_construct_prompt(state: QueryGraphState) -> str:
     # 5. 组装 Prompt
     prompt = load_prompt("answer_out",
                          local_evidence=local_evidence,
+                         kg_evidence=kg_evidence,
                          web_evidence=web_evidence,
                          history=history_str,
                          item_names=item_names_str,
@@ -212,10 +270,12 @@ def step_3_generate_response(state: QueryGraphState, prompt: str) -> QueryGraphS
     # 判断是否需要流式输出
     # 通常 state 中会注入 stream_queue 用于 SSE 推送
     session_id = state.get("session_id")
+    # 追踪/推送 key（§I-11）：优先 task_id，缺失时自动回退 session_id
+    trace_key = resolve_trace_key(state)
     is_stream = state.get("is_stream")
 
     if is_stream:
-        logger.info(f"模式: 流式输出 (Streaming), Session: {session_id}")
+        logger.info(f"模式: 流式输出 (Streaming), Session: {session_id}, TraceKey: {trace_key}")
         final_text = ""
         try:
             # 使用 stream 方法进行流式生成
@@ -224,24 +284,24 @@ def step_3_generate_response(state: QueryGraphState, prompt: str) -> QueryGraphS
                 if delta:
                     final_text += delta
                     # 将增量内容放入队列
-                    push_to_session(session_id, SSEEvent.DELTA, {"delta": delta})
+                    push_to_session(trace_key, SSEEvent.DELTA, {"delta": delta})
 
             logger.info(f"流式输出完成，总长度: {len(final_text)}")
 
         except Exception as e:
             logger.error(f"流式生成出错: {e}", exc_info=True)
             # 发生错误时，尝试推送到前端
-            push_to_session(session_id, SSEEvent.ERROR, {"error": str(e)})
+            push_to_session(trace_key, SSEEvent.ERROR, {"error": str(e)})
 
         state["answer"] = final_text
     else:
         # 非流式直接调用
-        logger.info(f"模式: 非流式输出 (Blocking), Session: {session_id}")
+        logger.info(f"模式: 非流式输出 (Blocking), Session: {session_id}, TraceKey: {trace_key}")
         try:
             response = llm.invoke(prompt)
             content = response.content
             state["answer"] = content
-            set_task_result(session_id, "answer", content)
+            set_task_result(trace_key, "answer", content)
             logger.info(f"生成回答完成，长度: {len(content)}")
         except Exception as e:
             logger.error(f"生成回答出错: {e}", exc_info=True)
@@ -443,7 +503,7 @@ def node_answer_output(state: QueryGraphState) -> QueryGraphState:
           ]
         }
     """
-    add_running_task(state['session_id'], sys._getframe().f_code.co_name, state.get("is_stream"))
+    add_running_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
     # 阶段一：检查answer是否存在,如果存在直接输出answer中的答案
     answer_exists = step_1_check_answer(state)
     # 阶段二  如果没有answer则 构建 Prompt
@@ -464,11 +524,11 @@ def node_answer_output(state: QueryGraphState) -> QueryGraphState:
         # 非流式路径下 step_3 已把原始答案写入 task_result，这里同步为清洗后的版本，
         # 否则轮询结果的调用方拿到的仍是未经清洗的答案。
         if not state.get("is_stream"):
-            set_task_result(state["session_id"], "answer", safe_answer)
+            set_task_result(resolve_trace_key(state), "answer", safe_answer)
     answer_text = safe_answer
 
-    # 候选图片只取本地知识库证据（type=milvus），并叠加域名白名单。
-    local_docs, _ = _split_docs_by_type(state.get("reranked_docs") or [])
+    # 候选图片只取本地知识库证据（type=milvus，图谱关系不含图片），并叠加域名白名单。
+    local_docs, _, _ = _split_docs_by_type(state.get("reranked_docs") or [])
     candidate_images = [u for u in _extract_images_from_docs(local_docs)
                         if _is_trusted_image_url(u)]
     answer_images = _extract_images_from_answer(answer_text)
@@ -489,13 +549,13 @@ def node_answer_output(state: QueryGraphState) -> QueryGraphState:
     if state.get("answer"):
         logger.info("---写入MongoDB历史记录---")
         step_4_write_history(state, image_urls=image_urls)
-    add_done_task(state['session_id'], sys._getframe().f_code.co_name, state.get("is_stream"))
+    add_done_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
 
     # 阶段五: 流式输出结束，发送 final 事件 [最后兜底，确保图片都能争取渲染和结束]
     logger.info(f"---发送 final 事件---图片为：{image_urls}")
     if state.get("is_stream"):
         push_to_session(
-            state['session_id'],
+            resolve_trace_key(state),
             SSEEvent.FINAL,
             {
                 "answer": state["answer"],

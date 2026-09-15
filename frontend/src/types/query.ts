@@ -43,6 +43,8 @@ export type SseEvent =
 export interface QueryResponse {
   message: string;
   session_id: string;
+  /** 任务标识（§I-11）：SSE 队列 key，与 session_id 分离；旧后端可能缺失，前端回退 session_id */
+  task_id?: string;
   answer?: string;
   done_list?: string[];
 }

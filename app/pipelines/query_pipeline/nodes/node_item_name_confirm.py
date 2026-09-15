@@ -5,6 +5,7 @@ from langchain_core.output_parsers import JsonOutputParser
 from app.conf.milvus_config import milvus_config
 from app.prompts.loader import load_prompt
 
+from app.pipelines.query_pipeline.state import resolve_trace_key
 from app.utils.task_utils import add_running_task, add_done_task
 from app.repositories.history_repo import get_recent_messages, save_chat_message
 from app.clients.llm_client import get_llm_client
@@ -252,7 +253,7 @@ def node_item_name_confirm(state):
     输出：更新 state['item_names']
     """
     #  1. 日志和任务处理 is_stream
-    add_running_task(state["session_id"], sys._getframe().f_code.co_name, state["is_stream"])
+    add_running_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state["is_stream"])
     #  2. 取值和校验 (original_query | session_id)  step_1  raise ValueError
     original_query, session_id = step_1_data_validates(state)
     #  3. 获取历史聊天记录(session_id) => list[message]
@@ -277,7 +278,7 @@ def node_item_name_confirm(state):
     # 8.保存本次对话的记录(user)
     step_7_save_user_chat_message(state)
     # 记录任务结束
-    add_done_task(state["session_id"], sys._getframe().f_code.co_name, state["is_stream"])
+    add_done_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state["is_stream"])
     return state
 
 

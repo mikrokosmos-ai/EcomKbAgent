@@ -1,5 +1,5 @@
 /**
- * 导入链路步骤条（9 步）
+ * 导入链路步骤条（10 步，含阶段 D 新增的「导入知识图谱」）
  */
 import { Check, Circle, LoaderCircle } from "lucide-react";
 import { IMPORT_STEPS } from "../../lib/nodes";

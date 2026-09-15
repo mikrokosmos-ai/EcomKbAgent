@@ -22,7 +22,8 @@ class QueryPipelineConfig:
 
     # ==================== 重排与动态截断（node_rerank）====================
     rerank_max_topk: int         # 动态 TopK 硬上限
-    rerank_min_topk: int         # 动态 TopK 下限，至少保留的条数
+    rerank_min_topk: int         # 动态 TopK 下限：断崖截断后**至少保留**的条数（对齐原型：3）
+    rerank_min_local_keep: int   # 分区保底：本地（milvus）切片至少保留条数（0 = 关闭）
     rerank_gap_ratio: float      # 断崖检测：相对落差阈值
     rerank_gap_abs: float        # 断崖检测：绝对分差阈值
 
@@ -50,14 +51,27 @@ class QueryPipelineConfig:
     # ==================== 联网搜索（node_web_search_mcp）====================
     web_search_count: int        # MCP 联网搜索返回条数
 
+    # ==================== 知识图谱检索（node_query_kg / node_rrf / node_answer_output）====================
+    kg_max_seed_candidates: int  # 实体对齐阶段最多取多少个种子实体
+    kg_max_total_triples: int    # 一跳扩展返回的三元组上限
+    rrf_kg_weight: float         # RRF 融合时图谱路的权重（其余两路恒为 1.0）
+    kg_evidence_budget: int      # 图谱证据区预算（从 LOCAL_EVIDENCE_BUDGET 中划分，不额外挤占总预算）
+
 
 # 实例化配置对象，和其他 *_config 命名风格保持一致
 query_pipeline_config = QueryPipelineConfig(
     # ---- 重排与动态截断 ----
     rerank_max_topk=int(os.getenv("RERANK_MAX_TOPK", "10")),
-    rerank_min_topk=int(os.getenv("RERANK_MIN_TOPK", "1")),
+    # 默认 3：**对齐原型（乙项目 rerank_min_top_k=3）**。
+    # 原值 1 时，断崖截断一旦触发就只保留 1 条，实测会把本地证据全部砍掉
+    # （联网首条高分 0.83 vs 本地 0.45 → gap_ratio 超阈 → topk=1）。
+    rerank_min_topk=int(os.getenv("RERANK_MIN_TOPK", "3")),
     rerank_gap_ratio=float(os.getenv("RERANK_GAP_RATIO", "0.25")),
     rerank_gap_abs=float(os.getenv("RERANK_GAP_ABS", "0.5")),
+    # 默认 3：cross-encoder 是**全局同池**打分（本地切片与联网结果一起排序），
+    # 实测本地的"安全警告式短句"会被高分网页挤出最终证据（本地只剩最不相关的那条）→
+    # 因此在断崖截断之后再按来源补足本地切片，保证"本地证据一定有代表"。（0 = 关闭保底）
+    rerank_min_local_keep=int(os.getenv("RERANK_MIN_LOCAL_KEEP", "3")),
     # ---- 多路融合 ----
     rrf_k=int(os.getenv("RRF_K", "60")),
     rrf_top=int(os.getenv("RRF_TOP", "5")),
@@ -77,6 +91,11 @@ query_pipeline_config = QueryPipelineConfig(
     web_evidence_budget=int(os.getenv("WEB_EVIDENCE_BUDGET", "2500")),
     # ---- 联网搜索 ----
     web_search_count=int(os.getenv("WEB_SEARCH_COUNT", "10")),
+    # ---- 知识图谱检索 ----
+    kg_max_seed_candidates=int(os.getenv("KG_MAX_SEED_CANDIDATES", "3")),
+    kg_max_total_triples=int(os.getenv("KG_MAX_TOTAL_TRIPLES", "50")),
+    rrf_kg_weight=float(os.getenv("RRF_KG_WEIGHT", "0.7")),
+    kg_evidence_budget=int(os.getenv("KG_EVIDENCE_BUDGET", "2000")),
 )
 
 
@@ -99,6 +118,16 @@ def _validate_query_pipeline_config(cfg: QueryPipelineConfig) -> None:
     if cfg.rerank_min_topk > cfg.rerank_max_topk:
         raise ConfigurationError(
             f"配置冲突：RERANK_MIN_TOPK({cfg.rerank_min_topk}) 不能大于 "
+            f"RERANK_MAX_TOPK({cfg.rerank_max_topk})"
+        )
+    # 1.1 分区保底条数必须非负，且不超过 TopK 上限（否则保底永远无法满足）
+    if cfg.rerank_min_local_keep < 0:
+        raise ConfigurationError(
+            f"配置非法：RERANK_MIN_LOCAL_KEEP({cfg.rerank_min_local_keep}) 不能为负数（0 表示关闭分区保底）"
+        )
+    if cfg.rerank_min_local_keep > cfg.rerank_max_topk:
+        raise ConfigurationError(
+            f"配置冲突：RERANK_MIN_LOCAL_KEEP({cfg.rerank_min_local_keep}) 不能大于 "
             f"RERANK_MAX_TOPK({cfg.rerank_max_topk})"
         )
     # 2. 断崖阈值必须为非负
@@ -140,6 +169,28 @@ def _validate_query_pipeline_config(cfg: QueryPipelineConfig) -> None:
     ):
         if value < 0:
             raise ConfigurationError(f"配置非法：{name}({value}) 不能为负数")
+    # 7. 知识图谱相关：种子/三元组数量必须为正、权重非负，
+    #    且图谱证据预算不能超过本地证据总预算（图谱区是从本地预算里划分出来的子区）
+    if cfg.kg_max_seed_candidates <= 0:
+        raise ConfigurationError(
+            f"配置非法：KG_MAX_SEED_CANDIDATES({cfg.kg_max_seed_candidates}) 必须大于 0"
+        )
+    if cfg.kg_max_total_triples <= 0:
+        raise ConfigurationError(
+            f"配置非法：KG_MAX_TOTAL_TRIPLES({cfg.kg_max_total_triples}) 必须大于 0"
+        )
+    if cfg.rrf_kg_weight < 0:
+        raise ConfigurationError(f"配置非法：RRF_KG_WEIGHT({cfg.rrf_kg_weight}) 不能为负数")
+    if cfg.kg_evidence_budget < 0:
+        raise ConfigurationError(
+            f"配置非法：KG_EVIDENCE_BUDGET({cfg.kg_evidence_budget}) 不能为负数"
+        )
+    if cfg.kg_evidence_budget > cfg.local_evidence_budget:
+        raise ConfigurationError(
+            f"配置冲突：KG_EVIDENCE_BUDGET({cfg.kg_evidence_budget}) 不能大于 "
+            f"LOCAL_EVIDENCE_BUDGET({cfg.local_evidence_budget})，"
+            f"因为图谱证据区预算是从本地证据总预算中划分出来的"
+        )
 
 
 # 模块加载即校验：配置矛盾时直接阻断启动，避免带病运行

@@ -1,6 +1,7 @@
 /**
  * SSE 流式通道客户端
- * 后端为 GET /stream/{session_id}（EventSource 模式），事件 ready/progress/delta/final/error。
+ * 后端为 GET /stream/{key}（EventSource 模式），事件 ready/progress/delta/final/error。
+ * key 为队列主键：§I-11 后传 task_id（同会话并发多轮互不覆盖）；兼容期可传 session_id（后端别名回退）。
  * 返回 close() 用于显式断开。
  */
 import type { SseEvent } from "../types/query";
@@ -12,11 +13,11 @@ export interface QueryStreamHandlers {
 }
 
 export function openQueryStream(
-  sessionId: string,
+  key: string,
   baseUrl: string,
   handlers: QueryStreamHandlers,
 ): () => void {
-  const es = new EventSource(`${baseUrl}/stream/${encodeURIComponent(sessionId)}`);
+  const es = new EventSource(`${baseUrl}/stream/${encodeURIComponent(key)}`);
 
   es.addEventListener("open", () => handlers.onOpen?.());
 

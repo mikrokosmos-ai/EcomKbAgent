@@ -4,6 +4,7 @@ import sys
 from langchain_core.messages import HumanMessage
 from langchain_core.output_parsers import StrOutputParser
 
+from app.pipelines.query_pipeline.state import resolve_trace_key
 from app.utils.task_utils import add_running_task, add_done_task
 from app.clients.llm_client import get_llm_client
 from app.clients.embedding_client import generate_embeddings
@@ -112,7 +113,7 @@ def node_search_embedding_hyde(state):
     先让 LLM 生成假设性答案，再对答案进行向量检索，提高召回率。
     """
     # 1. 日志和任务处理
-    add_running_task(state["session_id"], sys._getframe().f_code.co_name, state.get("is_stream"))
+    add_running_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
     # 2. 参数获取和校验(item_names / rewritten_query)
     item_names, rewritten_query = step_1_data_validates(state)
     # 3. 根据重写的问题调用模型查询答案
@@ -122,7 +123,7 @@ def node_search_embedding_hyde(state):
     # 5. 进行混合检索(过滤条件/双向量和权重设置/输出字段控制)
     mivlus_result = step_4_mivlus_hybrid_search(dense_vector, sparse_vector, item_names)
     # 6. 返回结果即可
-    add_done_task(state["session_id"], sys._getframe().f_code.co_name, state.get("is_stream"))
+    add_done_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
     return {"hyde_embedding_chunks": mivlus_result}
 
 

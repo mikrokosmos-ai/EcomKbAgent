@@ -5,6 +5,7 @@ from app.clients.milvus_client import get_milvus_client
 from app.repositories.vector_search_repo import create_hybrid_search_requests, hybrid_search
 from app.core.logger import logger, node_log, step_log
 from dotenv import load_dotenv, find_dotenv
+from app.pipelines.query_pipeline.state import resolve_trace_key
 from app.utils.task_utils import add_done_task, add_running_task
 from app.conf.query_pipeline_config import query_pipeline_config
 
@@ -80,7 +81,7 @@ def node_search_embedding(state):
     节点功能：进行向量内容检索
     """
     # 1. 日志和任务处理
-    add_running_task(state["session_id"], sys._getframe().f_code.co_name, state.get("is_stream"))
+    add_running_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
     # 2. 参数获取和校验(item_names / rewritten_query)
     item_names, rewritten_query = step_1_data_validates(state)
     # 3. 问题向量化获取稠密和稀疏向量
@@ -88,7 +89,7 @@ def node_search_embedding(state):
     # 4. 进行混合检索(过滤条件/双向量和权重设置/输出字段控制)
     mivlus_result = step_3_mivlus_hybrid_search(dense_vector, sparse_vector, item_names)
     # 5. 返回结果即可
-    add_done_task(state["session_id"], sys._getframe().f_code.co_name, state.get("is_stream"))
+    add_done_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
     return {"embedding_chunks": mivlus_result}
 
 

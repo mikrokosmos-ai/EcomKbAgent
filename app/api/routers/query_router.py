@@ -35,37 +35,48 @@ async def query(
     query_pipeline: Annotated[Any, Depends(get_query_pipeline)],
 ):
     is_stream = query_request.is_stream
+    # 会话标识：Mongo 历史按会话聚合，语义不变
     session_id = query_request.session_id or str(uuid.uuid4())
+    # 任务标识（§I-11）：SSE 队列 key + 任务追踪 key，与 session_id 解耦，
+    # 使同一会话内并发多轮查询互不覆盖
+    task_id = str(uuid.uuid4())
     query_text = query_request.query
     # 判定是否异步执行(流式)
     if is_stream:
-        # 异步流式 ,创建session_id对应的队列
-        create_sse_queue(session_id)  # [sse -> queue ]
+        # 异步流式 ,创建 task_id 对应的队列（session_id 注册为别名，兼容旧前端）
+        create_sse_queue(task_id, alias=session_id)  # [sse -> queue ]
         # 是 添加到异步任务中..
-        backgroundtasks.add_task(run_query_graph, session_id, query_text, is_stream, query_pipeline)
-        logger.info(f"query;{query_text}已经开启异步和流式处理!!")
-        # 立即返回结果
-        return {"message": "结果正在处理中...", "session_id": session_id}
+        backgroundtasks.add_task(run_query_graph, task_id, session_id, query_text, is_stream, query_pipeline)
+        logger.info(f"query;{query_text}已经开启异步和流式处理!! 会话={session_id} 任务={task_id}")
+        # 立即返回结果（同时返回 session_id 与 task_id，前端优先用 task_id）
+        return {"message": "结果正在处理中...", "session_id": session_id, "task_id": task_id}
     else:
         # 否,同步执行，但放到线程池避免阻塞事件循环
-        await run_in_threadpool(run_query_graph, session_id, query_text, is_stream, query_pipeline)
-        # 获取结果
-        answer = get_task_result(session_id, "answer")
+        await run_in_threadpool(run_query_graph, task_id, session_id, query_text, is_stream, query_pipeline)
+        # 获取结果（按 task_id 读取）
+        answer = get_task_result(task_id, "answer")
         logger.info(f"query;{query_text}已经开启同步处理!，处理结果为：{answer}!")
         # 等待结束以后,返回结果
         return {"message": "处理完成！",
                 "session_id": session_id,
+                "task_id": task_id,
                 "answer": answer,
-                "done_list": get_done_task_list(session_id)}
+                "done_list": get_done_task_list(task_id)}
 
 
 # 接口四: 流式获取结果
-@query_router.get("/stream/{session_id}")
-async def stream_query_result(session_id: str, request: Request):
-    logger.info(f"session_id = {session_id}客户端，已经和后台建立了长链接")
+@query_router.get("/stream/{key}")
+async def stream_query_result(key: str, request: Request):
+    """
+    流式结果推送（SSE）。
+
+    `key` 为队列主键：新前端传 `task_id`；兼容期旧前端传 `session_id`，
+    由 sse_utils 的别名机制回退到同一队列（§I-11 第 1 步兼容兜底）。
+    """
+    logger.info(f"key = {key}客户端，已经和后台建立了长链接")
     return StreamingResponse(
         # 生成器 函数 yield
-        sse_generator(session_id, request),
+        sse_generator(key, request),
         # 返回结果类型
         media_type="text/event-stream"
     )

@@ -1,6 +1,7 @@
 import sys
 from dotenv import load_dotenv
 from app.clients.reranker_client import get_reranker_model
+from app.pipelines.query_pipeline.state import resolve_trace_key
 from app.utils.task_utils import add_running_task, add_done_task
 from app.core.logger import logger, step_log, node_log, node_guard
 from app.conf.query_pipeline_config import query_pipeline_config
@@ -16,6 +17,8 @@ load_dotenv()
 RERANK_MAX_TOPK: int = query_pipeline_config.rerank_max_topk
 # 最小 TopK：至少保留前 N 条（>=1，且 <= RERANK_MAX_TOPK）
 RERANK_MIN_TOPK: int = query_pipeline_config.rerank_min_topk
+# 分区保底：本地（type == "milvus"）切片至少保留 N 条（0 = 关闭）
+RERANK_MIN_LOCAL_KEEP: int = query_pipeline_config.rerank_min_local_keep
 # 断崖阈值（相对）
 RERANK_GAP_RATIO: float = query_pipeline_config.rerank_gap_ratio
 # 断崖阈值（绝对）
@@ -38,10 +41,10 @@ def step_1_data_validates(state):
 def step_2_merged_rrf_and_mcp(rrf_chunks, web_search_docs):
     """
     进行两路数据融合! 统一格式方便后续数据处理!
-    {title: , text: content or snippet , url : mcp专属 , type: milvus or web , score : 0.0}
+    {title: , text: content or snippet , url : mcp专属 , type: milvus or kg or web , score : 0.0}
     :param rrf_chunks:
     :param web_search_docs:
-    :return: [{title: , text: content or snippet , url : mcp专属 , type: milvus or web , score : 0.0}]
+    :return: [{title: , text: content or snippet , url : mcp专属 , type: milvus or kg or web , score : 0.0}]
     """
     # 1. 准备工作,定义融合的数据集合
     final_chunk_list = []
@@ -53,7 +56,7 @@ def step_2_merged_rrf_and_mcp(rrf_chunks, web_search_docs):
                 "title": chunk.get("title"),
                 "text": chunk.get("content"),
                 "url": None,
-                "type": "milvus",
+                "type": chunk.get("type") or "milvus",
                 "score": 0.0
             })
     # 3. 循环web_mcp路数据整合
@@ -138,7 +141,10 @@ def step_4_chunk_topk(chunk_list_score_sorted):
     # [min_topk-1 : max_topk]
     if topk > min_topk:
         #   [1-1 = 0 , 5 -1 = 4 ) => 0 1 2 3
-        for index in range(min_topk - 1, max_topk - 1):
+        # 上界必须用 topk-1（topk = min(max_topk, len(list))）而不是 max_topk-1：
+        # 后者在"候选数少于 RERANK_MAX_TOPK"时会访问越界索引 → IndexError
+        # （实测：6 条平滑分数直接崩；原代码只在断崖提前 break 时才侥幸不触发）。
+        for index in range(min_topk - 1, topk - 1):
             # [ 0 , 1 ,2]
             score_1 = chunk_list_score_sorted[index].get("score", 0.0)
             score_2 = chunk_list_score_sorted[index + 1].get("score", 0.0)
@@ -157,6 +163,44 @@ def step_4_chunk_topk(chunk_list_score_sorted):
     return final_chunk_list
 
 
+@step_log("step_5_ensure_local_quota")
+def step_5_ensure_local_quota(sorted_docs, selected_docs, min_local: int = None):
+    """
+    分区保底：保证「本地知识库切片」在最终证据里至少有 min_local 条。
+
+    :param sorted_docs: step_3 输出的完整降序列表（含落选候选）
+    :param selected_docs: step_4 断崖截断后的选中结果
+    :param min_local: 本地切片至少保留条数（None 取配置 RERANK_MIN_LOCAL_KEEP）
+    :return: 补齐后的最终证据（按 score 降序，总数不超过 RERANK_MAX_TOPK）
+    """
+    if min_local is None:
+        min_local = RERANK_MIN_LOCAL_KEEP
+    if min_local <= 0 or not sorted_docs:
+        return selected_docs
+
+    # 用 id() 判定"是否已被选中"：selected_docs 是 sorted_docs 的元素切片，对象引用相同
+    selected_ids = {id(doc) for doc in selected_docs}
+    local_selected = [doc for doc in selected_docs if doc.get("type") == "milvus"]
+    need = min_local - len(local_selected)
+    if need <= 0:
+        return selected_docs
+
+    extra = [doc for doc in sorted_docs
+             if doc.get("type") == "milvus" and id(doc) not in selected_ids][:need]
+    if not extra:
+        logger.info(f"分区保底：本地切片 {len(local_selected)}/{min_local} 条，但已无可补候选")
+        return selected_docs
+
+    merged = sorted(selected_docs + extra, key=lambda x: x.get("score", 0.0), reverse=True)
+    final_docs = merged[:RERANK_MAX_TOPK]
+    local_final = sum(1 for doc in final_docs if doc.get("type") == "milvus")
+    logger.info(
+        f"分区保底：本地切片 {len(local_selected)} → {local_final} 条（补入 {len(extra)} 条），"
+        f"最终证据 {len(final_docs)} 条"
+    )
+    return final_docs
+
+
 # 装饰器定序约定：@node_guard 写在 @node_log 之上
 # （Python 自下而上应用 → node_log 先包裹并记录原始堆栈，node_guard 再包裹做异常归一化）
 # 本节点为 node_guard 的试点接入点，验证通过后将按同样方式逐步推广到其余节点。
@@ -167,21 +211,23 @@ def node_rerank(state):
     节点功能：使用 Cross-Encoder 模型对 RRF 后的结果进行精确打分重排。
     """
     # 1. 日志+任务
-    add_running_task(state["session_id"], sys._getframe().f_code.co_name, state.get("is_stream"))
+    add_running_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
     # 2. 获取参数校验
     rrf_chunks, web_search_docs = step_1_data_validates(state)
     # 3. 将两路数据捏到一起 [{},{}] -> 两个循环 rrf_chunks | web_search_docs
-    # 约定返回结果: [{title: ,  text: content or snippet ,  url : mcp专属 ,  ype: milvus or web ,  score : 0.0}]
+    # 约定返回结果: [{title: ,  text: content or snippet ,  url : mcp专属 ,  type: milvus or kg or web ,  score : 0.0}]
     final_chunk_list = step_2_merged_rrf_and_mcp(rrf_chunks, web_search_docs)
     # 4. 使用reranker进行问题和答案打分(批量处理)
-    #  [{title: , text: content or snippet , url : mcp专属 , type: milvus or web , score : 0.0}]
+    #  [{title: , text: content or snippet , url : mcp专属 , type: milvus or kg or web , score : 0.0}]
     #  不近得分,我们也做好了排序
     chunk_list_score_sorted = step_3_rerank_score_and_sort(state, final_chunk_list)
     # 5. 进行动态数据截取
     chunk__score_sorted_topk = step_4_chunk_topk(chunk_list_score_sorted)
-    # 6. 保存结果
-    state["reranked_docs"] = chunk__score_sorted_topk
-    add_done_task(state['session_id'], sys._getframe().f_code.co_name, state.get("is_stream"))
+    # 6. 分区保底：断崖之后仍保证本地切片至少 N 条（cross-encoder 全局同池排序会压制本地证据）
+    reranked_docs = step_5_ensure_local_quota(chunk_list_score_sorted, chunk__score_sorted_topk)
+    # 7. 保存结果
+    state["reranked_docs"] = reranked_docs
+    add_done_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
     return state
 
 

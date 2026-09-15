@@ -105,8 +105,33 @@ services:
     volumes:
       - mongo_data:/data/db
 
+  # ===== Neo4j 知识图谱（Bolt 7687 / Browser 7474）=====
+  # 说明：知识图谱为可选能力，未启动时导入/查询链路会降级（lifespan 仅告警，不阻断启动）
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: ecomkb-neo4j
+    restart: unless-stopped
+    environment:
+      # 用户名/密码需与 .env 的 NEO4J_USER / NEO4J_PASSWORD 一致
+      NEO4J_AUTH: neo4j/neo4j123456
+      NEO4J_server_memory_heap_max__size: 1G
+    ports:
+      - "7474:7474"   # Neo4j Browser
+      - "7687:7687"   # Bolt 协议（应用通过 bolt://127.0.0.1:7687 访问）
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null || exit 1"]
+      interval: 30s
+      start_period: 30s
+      timeout: 20s
+      retries: 3
+
 volumes:
   etcd_data:
   milvus_minio_data:
   milvus_data:
   mongo_data:
+  neo4j_data:
+  neo4j_logs:

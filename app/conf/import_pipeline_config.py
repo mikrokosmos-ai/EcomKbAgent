@@ -13,6 +13,16 @@ from app.core.exceptions import ConfigurationError
 load_dotenv()
 
 
+# ==================== 知识图谱白名单（领域知识，与 prompts/knowledge_graph.prompt 保持一致）====================
+# 说明：这是"抽取结果的过滤依据"，属于业务知识而非调优旋钮，故以模块常量固化、不走 .env；
+#       关系类型白名单之外的关系统一降级为 RELATED_TO，避免图谱被自由文本污染。
+KG_ALLOWED_ENTITY_LABELS = frozenset({"产品", "部件", "操作", "属性", "场景", "其他"})
+KG_ALLOWED_RELATION_TYPES = frozenset(
+    {"包含部件", "适用于", "具有属性", "操作方式", "相关产品", "RELATED_TO"}
+)
+KG_RELATION_FALLBACK = "RELATED_TO"
+
+
 @dataclass
 class ImportPipelineConfig:
     """导入链路可调参数"""
@@ -35,6 +45,9 @@ class ImportPipelineConfig:
     image_summary_rate_max_requests: int      # 窗口内最大请求数
     image_summary_rate_window_seconds: int    # 滑动窗口时长（秒）
 
+    # ==================== 知识图谱抽取过滤（node_import_kg）====================
+    entity_name_max_length: int   # 实体名长度上限，超长即截断（防止把整句话当成实体）
+
 
 # 实例化配置对象，和其他 *_config 命名风格保持一致
 import_pipeline_config = ImportPipelineConfig(
@@ -51,6 +64,8 @@ import_pipeline_config = ImportPipelineConfig(
     # ---- 图片摘要限流 ----
     image_summary_rate_max_requests=int(os.getenv("IMAGE_SUMMARY_RATE_MAX_REQUESTS", "9")),
     image_summary_rate_window_seconds=int(os.getenv("IMAGE_SUMMARY_RATE_WINDOW_SECONDS", "60")),
+    # ---- 知识图谱抽取过滤 ----
+    entity_name_max_length=int(os.getenv("ENTITY_NAME_MAX_LENGTH", "15")),
 )
 
 
@@ -100,6 +115,10 @@ def _validate_import_pipeline_config(cfg: ImportPipelineConfig) -> None:
         raise ConfigurationError(
             f"配置非法：IMAGE_SUMMARY_RATE_MAX_REQUESTS({cfg.image_summary_rate_max_requests}) 与 "
             f"IMAGE_SUMMARY_RATE_WINDOW_SECONDS({cfg.image_summary_rate_window_seconds}) 必须大于 0"
+        )
+    if cfg.entity_name_max_length <= 0:
+        raise ConfigurationError(
+            f"配置非法：ENTITY_NAME_MAX_LENGTH({cfg.entity_name_max_length}) 必须大于 0"
         )
 
 

@@ -32,6 +32,7 @@ class ImportGraphState(TypedDict):
 
     # --- 数据库相关 ---
     embeddings_content: list  # 包含向量数据的列表，准备写入 Milvus
+    kg_result: dict  # 知识图谱抽取统计 {entities:N, relations:M}（由 node_import_kg 产出）
 
 
 # 建议定一个初始化对象，方便后续使用
@@ -49,7 +50,8 @@ graph_default_state: ImportGraphState = {
     "md_content": "",
     "chunks": [],
     "item_name": "",
-    "embeddings_content": []
+    "embeddings_content": [],
+    "kg_result": {}
 }
 
 

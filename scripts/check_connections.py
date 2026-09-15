@@ -100,6 +100,19 @@ def check_minio() -> Optional[str]:
     return f"桶={minio_config.bucket_name} ({'已建' if ok else '未建，首次导入时自动创建'})"
 
 
+def check_neo4j() -> Optional[str]:
+    """Neo4j：校验连通性 + 报告实体/切片节点数（知识图谱，可选依赖）"""
+    from app.clients.neo4j_client import get_neo4j_driver
+    from app.conf.neo4j_config import neo4j_config
+
+    driver = get_neo4j_driver()
+    driver.verify_connectivity()
+    with driver.session(database=neo4j_config.database) as session:
+        entity_cnt = session.run("MATCH (e:Entity) RETURN count(e) AS c").single()["c"]
+        chunk_cnt = session.run("MATCH (c:Chunk) RETURN count(c) AS c").single()["c"]
+    return f"库={neo4j_config.database} | 实体={entity_cnt} | 切片={chunk_cnt}"
+
+
 def check_llm() -> Optional[str]:
     """LLM：发起一次最小对话请求，验证密钥、地址与模型名均可用"""
     from app.clients.llm_client import get_llm_client
@@ -185,10 +198,12 @@ def main() -> int:
         from app.conf.milvus_config import milvus_config
         from app.conf.minio_config import minio_config
         from app.conf.mongo_config import mongo_config
+        from app.conf.neo4j_config import neo4j_config
         _print_header("探测目标", [
             ("Milvus", milvus_config.milvus_url or "<未配置>"),
             ("MongoDB", mongo_config.mongo_url or "<未配置>"),
             ("MinIO", minio_config.endpoint or "<未配置>"),
+            ("Neo4j", neo4j_config.uri or "<未配置>"),
             ("LLM", f"{lm_config.base_url or '<未配置>'} / {lm_config.llm_model or '<未配置>'}"),
         ])
     except Exception as e:
@@ -205,6 +220,7 @@ def main() -> int:
     # 2. 可选依赖（失败仅影响部分功能）
     print("\n--- 可选依赖 ---")
     results.append(("MinIO", _run_check("MinIO", check_minio)))
+    results.append(("Neo4j", _run_check("Neo4j", check_neo4j)))
     if args.skip_llm:
         print("[SKIP] LLM                        用户通过 --skip-llm 跳过")
     else:

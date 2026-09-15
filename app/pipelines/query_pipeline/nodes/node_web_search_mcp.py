@@ -3,6 +3,7 @@ import json
 import sys
 from agents.mcp import MCPServerStreamableHttp
 from app.conf.bailian_mcp_config import mcp_config
+from app.pipelines.query_pipeline.state import resolve_trace_key
 from app.utils.task_utils import add_running_task, add_done_task
 from app.core.logger import logger, node_log, step_log
 from app.conf.query_pipeline_config import query_pipeline_config
@@ -72,7 +73,7 @@ def node_web_search_mcp(state):
     :return:
     """
     # 1. 任务和认知
-    add_running_task(state["session_id"], sys._getframe().f_code.co_name, state["is_stream"])
+    add_running_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state["is_stream"])
     # 2. 获取数据和校验
     rewritten_query = step_1_data_validate(state)
     # 3. mcp的调用流程封装成一个异步函数
@@ -92,7 +93,7 @@ def node_web_search_mcp(state):
     pages = text_dict.get('pages', [])
     logger.info(f"联网搜索命中{len(pages)}条结果，明细：{pages}")
     # 记录任务结束
-    add_done_task(state["session_id"], sys._getframe().f_code.co_name, state["is_stream"])
+    add_done_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state["is_stream"])
     return {"web_search_docs": pages}
 
 

@@ -85,10 +85,12 @@ export function useChat() {
           return;
         }
 
-        const { session_id } = await postQuery({ query, session_id: sid, is_stream: true });
+        const { session_id, task_id } = await postQuery({ query, session_id: sid, is_stream: true });
+        // §I-11：优先用 task_id 建流（同一会话并发多轮互不覆盖）；旧后端无该字段时回退 session_id
+        const streamKey = task_id ?? session_id;
         let rawAnswer = "";
 
-        const close = openQueryStream(session_id, QUERY_API, {
+        const close = openQueryStream(streamKey, QUERY_API, {
           onEvent: (ev) => {
             if (ev.type === "progress") {
               const running = ev.data.running_list ?? [];

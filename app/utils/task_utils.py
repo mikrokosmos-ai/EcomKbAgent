@@ -4,12 +4,6 @@ from .sse_utils import push_to_session
 """
 任务/会话进度追踪（单进程内存态）
 
-ID 语义说明（消除 task_id / session_id 的隐式契约）：
-- 本模块的 task_id 参数是「任务追踪标识」，统一作为追踪 key：
-    * import 流程：取 state["task_id"]（一个文件对应一个任务）
-    * query  流程：取 state["session_id"]（一个会话对应一次查询，此时 session_id 即 task_id）
-- 二者在各自流程中均为唯一追踪维度，且 push_to_session 使用的 session_id 与之一致，
-  因此 task_push_queue 直接把 task_id 作为 session_id 传给 SSE 层即可正确路由。
 """
 
 # ---------------------------

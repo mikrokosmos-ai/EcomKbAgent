@@ -1,5 +1,6 @@
 import sys
 from app.conf.query_pipeline_config import query_pipeline_config
+from app.pipelines.query_pipeline.state import resolve_trace_key
 from app.utils.task_utils import add_running_task, add_done_task
 from app.core.logger import logger, node_log, step_log
 
@@ -8,6 +9,8 @@ from app.core.logger import logger, node_log, step_log
 RRF_K = query_pipeline_config.rrf_k
 # top：融合排序后保留的条数
 RRF_TOP = query_pipeline_config.rrf_top
+# 知识图谱路的融合权重（向量路 / HyDE 路恒为 1.0）
+RRF_KG_WEIGHT = query_pipeline_config.rrf_kg_weight
 
 
 @step_log("step_1_data_validates")
@@ -19,7 +22,8 @@ def step_1_data_validates(state):
     """
     embedding_chunks = state.get("embedding_chunks", [])
     hyde_embedding_chunks = state.get("hyde_embedding_chunks", [])
-    return embedding_chunks, hyde_embedding_chunks
+    kg_chunks = state.get("kg_chunks", [])
+    return embedding_chunks, hyde_embedding_chunks, kg_chunks
 
 
 @step_log("step_2_rrf_list")
@@ -76,13 +80,14 @@ def node_rrf(state):
     将多路召回的结果（向量、HyDE、Web、KG）进行加权融合排序。
     """
     # 1. 日志+任务
-    add_running_task(state["session_id"], sys._getframe().f_code.co_name, state.get("is_stream"))
+    add_running_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
     # 2. 参数获取和校验 embedding_chunks hyde_embedding_chunks  get("key",[])
-    embedding_chunks, hyde_embedding_chunks = step_1_data_validates(state)
-    # 3. 处理下集合参数 [(embedding_chunks,1.0),(hyde_embedding_chunks,1.0)]  -> param_list
+    embedding_chunks, hyde_embedding_chunks, kg_chunks = step_1_data_validates(state)
+    # 3. 处理下集合参数 [(embedding_chunks,1.0),(hyde_embedding_chunks,1.0),(kg_chunks,RRF_KG_WEIGHT)]  -> param_list
     param_list = [
         (embedding_chunks, 1.0),
-        (hyde_embedding_chunks, 1.0)
+        (hyde_embedding_chunks, 1.0),
+        (kg_chunks, RRF_KG_WEIGHT)
     ]
     # 4. 定义个rrf+权重排序的函数  param_list  -> rrf_chunks
     """
@@ -112,7 +117,7 @@ def node_rrf(state):
     # 5.更新结果
     state["rrf_chunks"] = entity_list
     # ...
-    add_done_task(state['session_id'], sys._getframe().f_code.co_name, state.get("is_stream"))
+    add_done_task(resolve_trace_key(state), sys._getframe().f_code.co_name, state.get("is_stream"))
     return state
 
 

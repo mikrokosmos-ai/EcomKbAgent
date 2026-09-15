@@ -1,6 +1,7 @@
 /**
  * 查询链路流程图（仿 EcomQueryAgent StepRail）
- * 按 LangGraph 真实拓扑：三路召回 → RRF → 重排 → 生成答案，含「需澄清」短路支线。
+ * 按 LangGraph 真实拓扑：四路并行召回（切片 / 切片(假设性文档) / 网络 / 知识图谱）
+ * → RRF 融合 → 重排 → 生成答案，含「需澄清」短路支线。
  */
 import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, ChevronUp, Circle, LoaderCircle, X } from "lucide-react";
@@ -100,7 +101,7 @@ export function PipelineFlow({ steps = [] }: { steps?: StepState[] }) {
       <div className="mb-3 flex items-center justify-between gap-3 px-1">
         <div className="flex items-center gap-2">
           <div className="text-sm font-semibold text-ink">执行流程</div>
-          <div className="text-xs text-ink/45">LangGraph · RRF + Rerank</div>
+          <div className="text-xs text-ink/45">LangGraph · 四路召回 + RRF + Rerank</div>
         </div>
         <button
           type="button"
@@ -157,7 +158,7 @@ export function PipelineFlow({ steps = [] }: { steps?: StepState[] }) {
                   />
                 )}
                 {shortCircuited && (
-                  <text x="560" y="70" fill="rgba(32,32,29,0.55)" fontSize="12" fontWeight="500" textAnchor="middle">
+                  <text x="624" y="70" fill="rgba(32,32,29,0.55)" fontSize="12" fontWeight="500" textAnchor="middle">
                     需澄清
                   </text>
                 )}
